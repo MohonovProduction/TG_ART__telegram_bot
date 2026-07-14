@@ -1,0 +1,2 @@
+"""Local Telegram art renderer."""
+
