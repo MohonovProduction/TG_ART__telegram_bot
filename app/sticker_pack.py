@@ -50,18 +50,20 @@ def validate_pack_emoji(value: str) -> str:
     return emoji
 
 
-async def _upload_sticker(bot: "Bot", user_id: int, path: Path, emoji: str) -> "InputSticker":
+async def _upload_sticker(
+    bot: "Bot", user_id: int, path: Path, emoji: str, sticker_format: str
+) -> "InputSticker":
     from aiogram.types import FSInputFile, InputSticker
 
     uploaded = await bot.upload_sticker_file(
         user_id=user_id,
         sticker=FSInputFile(path),
-        sticker_format="video",
+        sticker_format=sticker_format,
         request_timeout=120,
     )
     if not uploaded.file_id:
         raise RuntimeError(f"Telegram не вернул file_id для {path.name}")
-    return InputSticker(sticker=uploaded.file_id, format="video", emoji_list=[emoji])
+    return InputSticker(sticker=uploaded.file_id, format=sticker_format, emoji_list=[emoji])
 
 
 async def create_custom_emoji_pack(
@@ -71,6 +73,7 @@ async def create_custom_emoji_pack(
     title: str,
     name: str,
     emoji: str,
+    sticker_format: str = "video",
     progress: Optional[ProgressCallback] = None,
 ) -> str:
     if not files:
@@ -79,7 +82,10 @@ async def create_custom_emoji_pack(
         raise ValueError("В одном custom emoji pack может быть не больше 200 элементов")
 
     total = len(files)
-    first = await _upload_sticker(bot, user_id, files[0], emoji)
+    if sticker_format not in {"static", "video"}:
+        raise ValueError("Формат пака должен быть static или video")
+
+    first = await _upload_sticker(bot, user_id, files[0], emoji, sticker_format)
     await bot.create_new_sticker_set(
         user_id=user_id,
         name=name,
@@ -92,7 +98,7 @@ async def create_custom_emoji_pack(
         await progress(1, total)
 
     for index, path in enumerate(files[1:], start=2):
-        sticker = await _upload_sticker(bot, user_id, path, emoji)
+        sticker = await _upload_sticker(bot, user_id, path, emoji, sticker_format)
         await bot.add_sticker_to_set(
             user_id=user_id,
             name=name,

@@ -183,3 +183,55 @@ async def render_grid(
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise
+
+
+async def render_image_grid(
+    source: Path,
+    columns: int,
+    rows: int,
+    output_root: Path,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+) -> RenderResult:
+    if not source.is_file():
+        raise RenderError(f"Файл не найден: {source}")
+    if not 1 <= columns <= 20 or not 1 <= rows <= 20:
+        raise RenderError("Размер сетки должен быть от 1×1 до 20×20")
+    if shutil.which(ffmpeg) is None or shutil.which(ffprobe) is None:
+        raise RenderError("FFmpeg и ffprobe должны быть доступны в PATH")
+
+    info = await probe_video(source, ffprobe)
+    if info.width < columns or info.height < rows:
+        raise RenderError("Сетка содержит больше ячеек, чем пикселей в исходнике")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=f"{source.stem}_", dir=output_root))
+    files: List[Path] = []
+    try:
+        for row in range(rows):
+            for column in range(columns):
+                destination = directory / f"tile_r{row + 1:02d}_c{column + 1:02d}.png"
+                left, top, width, height = _tile_bounds(
+                    info.width, info.height, columns, rows, column, row
+                )
+                video_filter = (
+                    f"crop={width}:{height}:{left}:{top},"
+                    "scale=100:100:flags=lanczos,setsar=1"
+                )
+                await _run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", str(source), "-map", "0:v:0", "-frames:v", "1",
+                        "-vf", video_filter, "-c:v", "png", str(destination),
+                    ]
+                )
+                files.append(destination)
+
+        archive = directory / f"{source.stem}_{columns}x{rows}.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for file in files:
+                zip_file.write(file, arcname=file.name)
+        return RenderResult(directory, archive, files, info)
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise

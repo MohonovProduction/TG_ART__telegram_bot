@@ -18,7 +18,8 @@ from aiogram.types import FSInputFile, Message
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
-from app.renderer import RenderError, render_grid
+from app.media import append_title_suffix, detect_source_kind
+from app.renderer import RenderError, render_grid, render_image_grid
 from app.sticker_pack import (
     create_custom_emoji_pack,
     make_sticker_set_name,
@@ -47,8 +48,10 @@ async def _reject(message: Message) -> None:
     await message.answer("Этот локальный бот доступен только владельцу.")
 
 
-async def _set_source(message: Message, state: FSMContext, source: Path, temporary: bool) -> None:
-    await state.update_data(source=str(source), temporary=temporary)
+async def _set_source(
+    message: Message, state: FSMContext, source: Path, temporary: bool, source_kind: str
+) -> None:
+    await state.update_data(source=str(source), temporary=temporary, source_kind=source_kind)
     await state.set_state(RenderFlow.waiting_for_grid)
     await message.answer(
         "Исходник принят. Отправьте размер сетки в формате <code>5x3</code> "
@@ -64,8 +67,9 @@ async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(RenderFlow.waiting_for_source)
     await message.answer(
-        "Отправьте lossless-видео с alpha <b>как файл</b> или пришлите полный "
-        "локальный путь к нему.\n\nНапример: <code>/Users/me/Desktop/art.mov</code>"
+        "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
+        "Также можно прислать полный локальный путь.\n\n"
+        "Например: <code>/Users/me/Desktop/art.png</code>"
     )
 
 
@@ -91,6 +95,11 @@ async def receive_document(message: Message, state: FSMContext, bot: Bot) -> Non
     suffix = Path(document.file_name or "source.mov").suffix or ".mov"
     destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}{suffix}"
     try:
+        source_kind = detect_source_kind(destination, document.mime_type)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    try:
         await bot.download(document, destination=destination)
     except Exception as error:
         await message.answer(
@@ -99,7 +108,18 @@ async def receive_document(message: Message, state: FSMContext, bot: Bot) -> Non
             f"Ошибка: <code>{type(error).__name__}</code>"
         )
         return
-    await _set_source(message, state, destination, temporary=True)
+    await _set_source(message, state, destination, temporary=True, source_kind=source_kind)
+
+
+@router.message(RenderFlow.waiting_for_source, F.photo)
+async def receive_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    photo = message.photo[-1]
+    destination = settings.temp_dir / f"{message.from_user.id}_{photo.file_unique_id}.jpg"
+    await bot.download(photo, destination=destination)
+    await _set_source(message, state, destination, temporary=True, source_kind="image")
 
 
 @router.message(RenderFlow.waiting_for_source, F.text)
@@ -111,7 +131,12 @@ async def receive_path(message: Message, state: FSMContext) -> None:
     if not source.is_file():
         await message.answer("Файл не найден. Проверьте полный путь и попробуйте ещё раз.")
         return
-    await _set_source(message, state, source, temporary=False)
+    try:
+        source_kind = detect_source_kind(source)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    await _set_source(message, state, source, temporary=False, source_kind=source_kind)
 
 
 @router.message(RenderFlow.waiting_for_grid, F.text)
@@ -134,7 +159,8 @@ async def receive_grid(message: Message, state: FSMContext) -> None:
     await state.set_state(RenderFlow.waiting_for_pack_title)
     await message.answer(
         "Как будет называться пак? Это отображаемое название, например "
-        "<code>My animated art</code>."
+        f"<code>My art</code>. Я автоматически добавлю "
+        f"<code>{html.escape(settings.pack_title_suffix)}</code>."
     )
 
 
@@ -144,7 +170,9 @@ async def receive_pack_title(message: Message, state: FSMContext) -> None:
         await _reject(message)
         return
     try:
-        title = validate_pack_title(message.text or "")
+        title = validate_pack_title(
+            append_title_suffix(message.text or "", settings.pack_title_suffix)
+        )
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
@@ -192,22 +220,32 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
 
     data: Dict[str, Any] = await state.get_data()
     source = Path(data["source"])
+    source_kind = data["source_kind"]
     columns, rows = int(data["columns"]), int(data["rows"])
     await message.answer(f"Рендерю сетку {columns}×{rows}. Это может занять несколько минут…")
     try:
-        result = await render_grid(
-            source=source,
-            columns=columns,
-            rows=rows,
-            output_root=settings.output_dir,
-            fps=settings.default_fps,
-            duration=settings.default_duration,
-            max_size_kb=settings.max_emoji_size_kb,
-        )
+        if source_kind == "image":
+            result = await render_image_grid(
+                source=source,
+                columns=columns,
+                rows=rows,
+                output_root=settings.output_dir,
+            )
+        else:
+            result = await render_grid(
+                source=source,
+                columns=columns,
+                rows=rows,
+                output_root=settings.output_dir,
+                fps=settings.default_fps,
+                duration=settings.default_duration,
+                max_size_kb=settings.max_emoji_size_kb,
+            )
         await message.answer_document(
             FSInputFile(result.archive),
             caption=(
-                f"Готово: {len(result.files)} файлов WebM.\n"
+                f"Готово: {len(result.files)} файлов "
+                f"{'PNG' if source_kind == 'image' else 'WebM'}.\n"
                 f"Исходник: {result.source_info.width}×{result.source_info.height}, "
                 f"{result.source_info.pixel_format}.\n"
                 f"Локальная папка: <code>{result.directory}</code>"
@@ -229,6 +267,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
             title=data["pack_title"],
             name=data["pack_name"],
             emoji=emoji,
+            sticker_format="static" if source_kind == "image" else "video",
             progress=report_progress,
         )
         await status.edit_text(

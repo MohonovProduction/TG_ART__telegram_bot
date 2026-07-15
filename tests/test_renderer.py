@@ -1,6 +1,8 @@
 import unittest
+from pathlib import Path
 
 from app.renderer import VideoInfo, _parse_fps, _tile_bounds
+from app.media import append_title_suffix, detect_source_kind
 from app.sticker_pack import make_sticker_set_name, validate_pack_emoji, validate_pack_title
 
 
@@ -32,6 +34,18 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(validate_pack_emoji(" 🎨 "), "🎨")
         with self.assertRaises(ValueError):
             make_sticker_set_name("123", "MyArtBot")
+
+    def test_media_detection_and_title_suffix(self):
+        self.assertEqual(detect_source_kind(Path("art.png")), "image")
+        self.assertEqual(detect_source_kind(Path("art.mov")), "video")
+        self.assertEqual(
+            append_title_suffix("My art", "by @mohonovproduction"),
+            "My art by @mohonovproduction",
+        )
+        self.assertEqual(
+            append_title_suffix("My art by @mohonovproduction", "by @mohonovproduction"),
+            "My art by @mohonovproduction",
+        )
 
 
 if __name__ == "__main__":
