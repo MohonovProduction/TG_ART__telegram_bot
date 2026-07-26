@@ -16,6 +16,8 @@ class Settings:
     default_fps: int = 30
     default_duration: float = 3.0
     max_emoji_size_kb: int = 256
+    max_static_sticker_size_kb: int = 512
+    max_video_sticker_size_kb: int = 256
     pack_title_suffix: str = "by @mohonovproduction"
 
     @classmethod
@@ -36,6 +38,12 @@ class Settings:
             default_fps=min(30, max(1, int(os.getenv("DEFAULT_FPS", "30")))),
             default_duration=min(3.0, max(0.1, float(os.getenv("DEFAULT_DURATION", "3")))),
             max_emoji_size_kb=int(os.getenv("MAX_EMOJI_SIZE_KB", "256")),
+            max_static_sticker_size_kb=int(
+                os.getenv("MAX_STATIC_STICKER_SIZE_KB", "512")
+            ),
+            max_video_sticker_size_kb=int(
+                os.getenv("MAX_VIDEO_STICKER_SIZE_KB", "256")
+            ),
             pack_title_suffix=os.getenv("PACK_TITLE_SUFFIX", "by @mohonovproduction").strip(),
         )
         settings.output_dir.mkdir(parents=True, exist_ok=True)

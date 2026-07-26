@@ -1,0 +1,19 @@
+#!/bin/zsh
+
+# Приложение можно перенести в /Applications: путь к проекту на этом Mac фиксирован.
+PROJECT_DIR="/Users/mohonovproduction/Documents/TG_ART_bot"
+RUN_SCRIPT="$PROJECT_DIR/run-bot.command"
+
+if [[ ! -x "$RUN_SCRIPT" ]]; then
+  /usr/bin/osascript -e 'display alert "TG ART Bot" message "Не найден run-bot.command в папке проекта." as critical'
+  exit 1
+fi
+
+/usr/bin/osascript - "$RUN_SCRIPT" <<'APPLESCRIPT'
+on run argv
+    tell application "Terminal"
+        activate
+        do script quoted form of item 1 of argv
+    end tell
+end run
+APPLESCRIPT

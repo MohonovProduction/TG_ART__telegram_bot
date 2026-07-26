@@ -14,14 +14,16 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import FSInputFile, Message
+from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
 from app.media import append_title_suffix, detect_source_kind
-from app.renderer import RenderError, render_grid, render_image_grid
+from app.renderer import RenderError, prepare_sticker_files, render_grid, render_image_grid
 from app.sticker_pack import (
+    build_tg_art_grid,
     create_custom_emoji_pack,
+    create_sticker_pack,
     make_sticker_set_name,
     validate_pack_emoji,
     validate_pack_title,
@@ -29,15 +31,39 @@ from app.sticker_pack import (
 
 
 class RenderFlow(StatesGroup):
+    waiting_for_mode = State()
     waiting_for_source = State()
     waiting_for_grid = State()
     waiting_for_pack_title = State()
     waiting_for_pack_name = State()
     waiting_for_emoji = State()
+    waiting_for_sticker_kind = State()
+    collecting_stickers = State()
+    waiting_for_sticker_emoji_mode = State()
+    waiting_for_common_sticker_emoji = State()
+    waiting_for_individual_sticker_emoji = State()
+    waiting_for_sticker_pack_title = State()
+    waiting_for_sticker_pack_name = State()
 
 
 router = Router()
 settings: Settings
+
+MODE_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+STICKER_KIND_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Статичные"), KeyboardButton(text="Видео")]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+EMOJI_MODE_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Один эмодзи для всех"), KeyboardButton(text="Отдельный эмодзи каждому")]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
 
 
 def _allowed(message: Message) -> bool:
@@ -46,6 +72,21 @@ def _allowed(message: Message) -> bool:
 
 async def _reject(message: Message) -> None:
     await message.answer("Этот локальный бот доступен только владельцу.")
+
+
+def _sticker_limit(sticker_format: str) -> int:
+    return 120 if sticker_format == "static" else 50
+
+
+def _natural_path_key(path: Path) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+async def _cleanup_temporary_sources(data: Dict[str, Any]) -> None:
+    if data.get("temporary") and data.get("source"):
+        Path(data["source"]).unlink(missing_ok=True)
+    for source in data.get("temporary_sticker_sources", []):
+        Path(source).unlink(missing_ok=True)
 
 
 async def _set_source(
@@ -59,17 +100,53 @@ async def _set_source(
     )
 
 
+async def _start_sticker_collection(message: Message, state: FSMContext, sticker_format: str) -> None:
+    await state.update_data(
+        sticker_format=sticker_format,
+        sticker_sources=[],
+        temporary_sticker_sources=[],
+    )
+    await state.set_state(RenderFlow.collecting_stickers)
+    source_kind = "изображения" if sticker_format == "static" else "видео"
+    await message.answer(
+        f"Отправляйте {source_kind} как файлы. Можно прислать несколько сообщений или "
+        "указать путь к папке на компьютере с ботом. Когда закончите, отправьте /done.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def _finish_sticker_collection(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    sources = data.get("sticker_sources", [])
+    if not sources:
+        await message.answer("Сначала добавьте хотя бы один файл.")
+        return
+    await state.set_state(RenderFlow.waiting_for_sticker_emoji_mode)
+    await message.answer(
+        f"Принято файлов: <b>{len(sources)}</b>. Как назначить эмодзи?",
+        reply_markup=EMOJI_MODE_KEYBOARD,
+    )
+
+
+async def _ask_sticker_pack_title(message: Message, state: FSMContext) -> None:
+    await state.set_state(RenderFlow.waiting_for_sticker_pack_title)
+    await message.answer(
+        "Как будет называться sticker pack? Например <code>My stickers</code>. "
+        f"Я автоматически добавлю <code>{html.escape(settings.pack_title_suffix)}</code>.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
     await state.clear()
-    await state.set_state(RenderFlow.waiting_for_source)
+    await state.set_state(RenderFlow.waiting_for_mode)
     await message.answer(
-        "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
-        "Также можно прислать полный локальный путь.\n\n"
-        "Например: <code>/Users/me/Desktop/art.png</code>"
+        "Что хотите создать?",
+        reply_markup=MODE_KEYBOARD,
     )
 
 
@@ -79,10 +156,262 @@ async def cancel(message: Message, state: FSMContext) -> None:
         await _reject(message)
         return
     data = await state.get_data()
-    if data.get("temporary") and data.get("source"):
-        Path(data["source"]).unlink(missing_ok=True)
+    await _cleanup_temporary_sources(data)
     await state.clear()
     await message.answer("Отменено. Используйте /start для нового рендера.")
+
+
+@router.message(RenderFlow.waiting_for_mode, F.text)
+async def receive_mode(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    mode = (message.text or "").strip().lower()
+    if mode in {"🎨 tg art", "tg art", "art", "эмодзи", "emoji"}:
+        await state.set_state(RenderFlow.waiting_for_source)
+        await message.answer(
+            "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
+            "Также можно прислать полный локальный путь.\n\n"
+            "Например: <code>/Users/me/Desktop/art.png</code>"
+        )
+        return
+    if mode in {"🖼 стикер пак", "стикер пак", "стикеры", "стикер", "stickers", "sticker"}:
+        await state.set_state(RenderFlow.waiting_for_sticker_kind)
+        await message.answer(
+            "Выберите тип стикеров.",
+            reply_markup=STICKER_KIND_KEYBOARD,
+        )
+        return
+    await message.answer("Выберите вариант кнопкой ниже.", reply_markup=MODE_KEYBOARD)
+
+
+@router.message(RenderFlow.waiting_for_sticker_kind, F.text)
+async def receive_sticker_kind(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    value = (message.text or "").strip().lower()
+    if value in {"статичные", "статические", "static"}:
+        await _start_sticker_collection(message, state, "static")
+        return
+    if value in {"видео", "video"}:
+        await _start_sticker_collection(message, state, "video")
+        return
+    await message.answer("Выберите <b>Статичные</b> или <b>Видео</b>.", reply_markup=STICKER_KIND_KEYBOARD)
+
+
+@router.message(RenderFlow.collecting_stickers, Command("done"))
+async def finish_sticker_collection(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    await _finish_sticker_collection(message, state)
+
+
+@router.message(RenderFlow.collecting_stickers, F.document)
+async def receive_sticker_document(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    document = message.document
+    assert document is not None
+    data = await state.get_data()
+    sticker_format = data["sticker_format"]
+    limit = _sticker_limit(sticker_format)
+    sources = list(data.get("sticker_sources", []))
+    if len(sources) >= limit:
+        await message.answer(f"В этом наборе может быть не больше {limit} стикеров.")
+        return
+
+    suffix = Path(document.file_name or "sticker").suffix
+    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}{suffix}"
+    try:
+        source_kind = detect_source_kind(destination, document.mime_type)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    expected_kind = "image" if sticker_format == "static" else "video"
+    if source_kind != expected_kind:
+        expected_label = "изображение" if expected_kind == "image" else "видео"
+        await message.answer(f"Для этого набора нужно отправить {expected_label}.")
+        return
+    try:
+        await bot.download(document, destination=destination)
+    except Exception as error:
+        await message.answer(f"Не удалось скачать файл: <code>{type(error).__name__}</code>")
+        return
+
+    sources.append(str(destination))
+    temporary_sources = list(data.get("temporary_sticker_sources", []))
+    temporary_sources.append(str(destination))
+    await state.update_data(sticker_sources=sources, temporary_sticker_sources=temporary_sources)
+    await message.answer(f"Добавлено: {len(sources)}/{limit}. Отправьте ещё файлы или /done.")
+
+
+@router.message(RenderFlow.collecting_stickers, F.text)
+async def receive_sticker_folder(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    folder = Path((message.text or "").strip()).expanduser().resolve()
+    if not folder.is_dir():
+        await message.answer("Отправьте файл, путь к папке или /done.")
+        return
+    data = await state.get_data()
+    sticker_format = data["sticker_format"]
+    expected_kind = "image" if sticker_format == "static" else "video"
+    limit = _sticker_limit(sticker_format)
+    sources = list(data.get("sticker_sources", []))
+    accepted: list[Path] = []
+    for path in sorted((item for item in folder.iterdir() if item.is_file()), key=_natural_path_key):
+        try:
+            if detect_source_kind(path) == expected_kind:
+                accepted.append(path)
+        except ValueError:
+            continue
+    remaining = limit - len(sources)
+    if not accepted:
+        await message.answer("В папке нет файлов подходящего формата.")
+        return
+    if len(accepted) > remaining:
+        await message.answer(f"В папке {len(accepted)} файлов, но можно добавить только {remaining}.")
+        return
+    sources.extend(str(path) for path in accepted)
+    await state.update_data(sticker_sources=sources)
+    await message.answer(f"Добавлено из папки: {len(accepted)}. Всего: {len(sources)}/{limit}. Отправьте /done.")
+
+
+@router.message(RenderFlow.waiting_for_sticker_emoji_mode, F.text)
+async def receive_sticker_emoji_mode(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    value = (message.text or "").strip().lower()
+    if value in {"один эмодзи для всех", "один", "общий"}:
+        await state.set_state(RenderFlow.waiting_for_common_sticker_emoji)
+        await message.answer("Отправьте один эмодзи для всех стикеров.", reply_markup=ReplyKeyboardRemove())
+        return
+    if value in {"отдельный эмодзи каждому", "отдельный", "каждому"}:
+        await state.update_data(sticker_emojis=[], individual_emoji_index=0)
+        await state.set_state(RenderFlow.waiting_for_individual_sticker_emoji)
+        await message.answer("Отправьте эмодзи для стикера 1.", reply_markup=ReplyKeyboardRemove())
+        return
+    await message.answer("Выберите способ назначения эмодзи.", reply_markup=EMOJI_MODE_KEYBOARD)
+
+
+@router.message(RenderFlow.waiting_for_common_sticker_emoji, F.text)
+async def receive_common_sticker_emoji(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    try:
+        emoji = validate_pack_emoji(message.text or "")
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    data = await state.get_data()
+    await state.update_data(sticker_emojis=[emoji] * len(data["sticker_sources"]))
+    await _ask_sticker_pack_title(message, state)
+
+
+@router.message(RenderFlow.waiting_for_individual_sticker_emoji, F.text)
+async def receive_individual_sticker_emoji(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    try:
+        emoji = validate_pack_emoji(message.text or "")
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    data = await state.get_data()
+    emojis = list(data.get("sticker_emojis", []))
+    emojis.append(emoji)
+    total = len(data["sticker_sources"])
+    if len(emojis) == total:
+        await state.update_data(sticker_emojis=emojis)
+        await _ask_sticker_pack_title(message, state)
+        return
+    await state.update_data(sticker_emojis=emojis, individual_emoji_index=len(emojis))
+    await message.answer(f"Отправьте эмодзи для стикера {len(emojis) + 1} из {total}.")
+
+
+@router.message(RenderFlow.waiting_for_sticker_pack_title, F.text)
+async def receive_sticker_pack_title(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    try:
+        title = validate_pack_title(append_title_suffix(message.text or "", settings.pack_title_suffix))
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    await state.update_data(sticker_pack_title=title)
+    await state.set_state(RenderFlow.waiting_for_sticker_pack_name)
+    await message.answer("Введите короткое имя ссылки, например <code>my_stickers</code>.")
+
+
+@router.message(RenderFlow.waiting_for_sticker_pack_name, F.text)
+async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    bot_user = await bot.get_me()
+    if not bot_user.username:
+        await message.answer("У бота должен быть username. Задайте его через @BotFather.")
+        return
+    try:
+        pack_name = make_sticker_set_name(message.text or "", bot_user.username)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+
+    data: Dict[str, Any] = await state.get_data()
+    sources = [Path(source) for source in data["sticker_sources"]]
+    sticker_format = data["sticker_format"]
+    await message.answer(f"Конвертирую {len(sources)} стикеров. Это может занять несколько минут…")
+    try:
+        result = await prepare_sticker_files(
+            sources=sources,
+            sticker_format=sticker_format,
+            output_root=settings.output_dir,
+            fps=settings.default_fps,
+            duration=settings.default_duration,
+            max_static_size_kb=settings.max_static_sticker_size_kb,
+            max_video_size_kb=settings.max_video_sticker_size_kb,
+        )
+        await message.answer_document(
+            FSInputFile(result.archive),
+            caption=f"Готово: {len(result.files)} файлов {sticker_format}. Локальная папка: <code>{result.directory}</code>",
+        )
+        status = await message.answer(f"Создаю sticker pack: загружено 0/{len(result.files)}…")
+
+        async def report_progress(completed: int, total: int) -> None:
+            if completed == total or completed == 1 or completed % 5 == 0:
+                await status.edit_text(f"Создаю sticker pack: загружено {completed}/{total}…")
+
+        pack_url = await create_sticker_pack(
+            bot=bot,
+            user_id=settings.allowed_user_id,
+            files=result.files,
+            title=data["sticker_pack_title"],
+            name=pack_name,
+            emojis=data["sticker_emojis"],
+            sticker_format=sticker_format,
+            progress=report_progress,
+        )
+        await status.edit_text(
+            f"Sticker pack создан: <a href=\"{pack_url}\">{html.escape(data['sticker_pack_title'])}</a>"
+        )
+    except RenderError as error:
+        await message.answer(f"Конвертация не выполнена:\n<code>{html.escape(str(error)[:3500])}</code>")
+    except TelegramAPIError as error:
+        await message.answer(f"Telegram не смог создать пак:\n<code>{html.escape(str(error)[:3000])}</code>")
+    except Exception as error:
+        await message.answer(f"Не удалось завершить создание пака:\n<code>{html.escape(str(error)[:3000])}</code>")
+    finally:
+        await _cleanup_temporary_sources(data)
+        await state.clear()
 
 
 @router.message(RenderFlow.waiting_for_source, F.document)
@@ -273,6 +602,14 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
         await status.edit_text(
             f"Emoji pack создан: <a href=\"{pack_url}\">{html.escape(data['pack_title'])}</a>"
         )
+        sticker_set = await bot.get_sticker_set(data["pack_name"])
+        custom_emoji_ids = [
+            sticker.custom_emoji_id
+            for sticker in sticker_set.stickers
+            if sticker.custom_emoji_id
+        ]
+        tg_art, entities = build_tg_art_grid(custom_emoji_ids, columns, rows)
+        await message.answer(tg_art, entities=entities)
     except RenderError as error:
         await message.answer(f"Рендер не выполнен:\n<code>{html.escape(str(error)[:3500])}</code>")
     except TelegramAPIError as error:

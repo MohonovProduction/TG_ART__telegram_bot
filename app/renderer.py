@@ -133,6 +133,111 @@ async def _encode_tile(
     )
 
 
+async def _encode_sticker_video(
+    source: Path,
+    destination: Path,
+    fps: int,
+    duration: float,
+    max_bytes: int,
+    ffmpeg: str,
+) -> None:
+    """Convert an arbitrary source video into a Telegram video sticker."""
+    attempts = (28, 32, 36, 40, 44, 48, 52)
+    video_filter = (
+        "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,"
+        "pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+        f"fps={min(30, fps)},setsar=1,format=yuva420p"
+    )
+    for crf in attempts:
+        destination.unlink(missing_ok=True)
+        await _run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source), "-map", "0:v:0", "-an", "-t", str(duration),
+                "-vf", video_filter, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                "-b:v", "0", "-crf", str(crf), "-deadline", "good", "-cpu-used", "2",
+                "-row-mt", "1", "-auto-alt-ref", "0", "-metadata:s:v:0", "alpha_mode=1",
+                str(destination),
+            ]
+        )
+        if destination.stat().st_size <= max_bytes:
+            return
+    raise RenderError(
+        f"{source.name} не удалось уменьшить до {max_bytes // 1024} KB."
+    )
+
+
+async def _encode_static_sticker(
+    source: Path, destination: Path, max_bytes: int, ffmpeg: str
+) -> None:
+    video_filter = (
+        "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,"
+        "pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba"
+    )
+    for quality in (85, 75, 65, 55, 45):
+        destination.unlink(missing_ok=True)
+        await _run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                "-map", "0:v:0", "-frames:v", "1", "-vf", video_filter,
+                "-c:v", "libwebp", "-lossless", "0", "-q:v", str(quality), str(destination),
+            ]
+        )
+        if destination.stat().st_size <= max_bytes:
+            return
+    raise RenderError(f"{source.name} не удалось уменьшить до {max_bytes // 1024} KB.")
+
+
+async def prepare_sticker_files(
+    sources: Sequence[Path],
+    sticker_format: str,
+    output_root: Path,
+    fps: int = 30,
+    duration: float = 3.0,
+    max_static_size_kb: int = 512,
+    max_video_size_kb: int = 256,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+) -> RenderResult:
+    """Convert source files to static WebP or video WebM Telegram stickers."""
+    if sticker_format not in {"static", "video"}:
+        raise RenderError("Формат стикера должен быть static или video")
+    if not sources:
+        raise RenderError("Нет файлов для создания набора")
+    if max_static_size_kb < 1 or max_video_size_kb < 1:
+        raise RenderError("Лимит размера стикера должен быть положительным")
+    if shutil.which(ffmpeg) is None or shutil.which(ffprobe) is None:
+        raise RenderError("FFmpeg и ffprobe должны быть доступны в PATH")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="stickers_", dir=output_root))
+    files: List[Path] = []
+    try:
+        for index, source in enumerate(sources, start=1):
+            info = await probe_video(source, ffprobe)
+            if sticker_format == "static":
+                destination = directory / f"sticker_{index:03d}.webp"
+                await _encode_static_sticker(
+                    source, destination, max_static_size_kb * 1024, ffmpeg
+                )
+            else:
+                destination = directory / f"sticker_{index:03d}.webm"
+                effective_duration = min(duration, info.duration) if info.duration > 0 else duration
+                await _encode_sticker_video(
+                    source, destination, fps, effective_duration, max_video_size_kb * 1024, ffmpeg
+                )
+            files.append(destination)
+
+        archive = directory / f"stickers_{sticker_format}.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for file in files:
+                zip_file.write(file, arcname=file.name)
+        return RenderResult(directory, archive, files, await probe_video(sources[0], ffprobe))
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
 async def render_grid(
     source: Path,
     columns: int,

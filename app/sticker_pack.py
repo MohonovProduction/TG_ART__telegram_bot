@@ -4,12 +4,42 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence
 
+from aiogram.types import MessageEntity
+
 if TYPE_CHECKING:
     from aiogram import Bot
     from aiogram.types import InputSticker
 
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
+
+
+def build_tg_art_grid(
+    custom_emoji_ids: Sequence[str], columns: int, rows: int
+) -> tuple[str, list[MessageEntity]]:
+    """Build a row-major custom-emoji message matching the rendered grid."""
+    if columns < 1 or rows < 1 or len(custom_emoji_ids) != columns * rows:
+        raise ValueError("Число custom emoji не соответствует размеру сетки")
+
+    placeholder = "\u25a0"
+    text_parts: list[str] = []
+    entities: list[MessageEntity] = []
+    offset = 0
+    for index, custom_emoji_id in enumerate(custom_emoji_ids):
+        text_parts.append(placeholder)
+        entities.append(
+            MessageEntity(
+                type="custom_emoji",
+                offset=offset,
+                length=1,
+                custom_emoji_id=custom_emoji_id,
+            )
+        )
+        offset += 1
+        if (index + 1) % columns == 0 and index + 1 < len(custom_emoji_ids):
+            text_parts.append("\n")
+            offset += 1
+    return "".join(text_parts), entities
 
 
 def make_sticker_set_name(value: str, bot_username: str) -> str:
@@ -76,29 +106,59 @@ async def create_custom_emoji_pack(
     sticker_format: str = "video",
     progress: Optional[ProgressCallback] = None,
 ) -> str:
+    return await create_sticker_pack(
+        bot=bot,
+        user_id=user_id,
+        files=files,
+        title=title,
+        name=name,
+        emojis=[emoji] * len(files),
+        sticker_format=sticker_format,
+        sticker_type="custom_emoji",
+        progress=progress,
+    )
+
+
+async def create_sticker_pack(
+    bot: "Bot",
+    user_id: int,
+    files: Sequence[Path],
+    title: str,
+    name: str,
+    emojis: Sequence[str],
+    sticker_format: str,
+    sticker_type: str = "regular",
+    progress: Optional[ProgressCallback] = None,
+) -> str:
     if not files:
         raise ValueError("Нет файлов для создания пака")
-    if len(files) > 200:
-        raise ValueError("В одном custom emoji pack может быть не больше 200 элементов")
-
-    total = len(files)
     if sticker_format not in {"static", "video"}:
         raise ValueError("Формат пака должен быть static или video")
+    if sticker_type not in {"regular", "custom_emoji"}:
+        raise ValueError("Тип пака должен быть regular или custom_emoji")
+    if len(files) != len(emojis):
+        raise ValueError("Для каждого файла должен быть указан эмодзи")
 
-    first = await _upload_sticker(bot, user_id, files[0], emoji, sticker_format)
+    max_stickers = 200 if sticker_type == "custom_emoji" else (120 if sticker_format == "static" else 50)
+    if len(files) > max_stickers:
+        raise ValueError(f"В таком наборе может быть не больше {max_stickers} стикеров")
+
+    total = len(files)
+
+    first = await _upload_sticker(bot, user_id, files[0], emojis[0], sticker_format)
     await bot.create_new_sticker_set(
         user_id=user_id,
         name=name,
         title=title,
         stickers=[first],
-        sticker_type="custom_emoji",
+        sticker_type=sticker_type,
         request_timeout=120,
     )
     if progress:
         await progress(1, total)
 
     for index, path in enumerate(files[1:], start=2):
-        sticker = await _upload_sticker(bot, user_id, path, emoji, sticker_format)
+        sticker = await _upload_sticker(bot, user_id, path, emojis[index - 1], sticker_format)
         await bot.add_sticker_to_set(
             user_id=user_id,
             name=name,
@@ -108,4 +168,5 @@ async def create_custom_emoji_pack(
         if progress:
             await progress(index, total)
 
-    return f"https://t.me/addemoji/{name}"
+    link_type = "addemoji" if sticker_type == "custom_emoji" else "addstickers"
+    return f"https://t.me/{link_type}/{name}"

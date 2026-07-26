@@ -1,6 +1,6 @@
 # TG ART Bot
 
-A personal Telegram bot that splits an image or an alpha-channel video into a grid and automatically creates a ready-to-use custom emoji pack.
+A personal Telegram bot that creates custom-emoji art grids and ordinary static or video sticker packs.
 
 Static images are converted to `100×100` PNG files. Videos are converted to `100×100` WebM/VP9 files with transparency, a maximum frame rate of 30 FPS, a maximum duration of 3 seconds, and no audio.
 
@@ -12,6 +12,9 @@ Static images are converted to `100×100` PNG files. Videos are converted to `10
 - Optimizes video emoji files to meet Telegram size limits
 - Generates a ZIP archive with all rendered tiles
 - Creates and fills a Telegram custom emoji pack automatically
+- Creates ordinary static and video sticker packs from a batch of files
+- Lets you assign one emoji to all stickers or an individual emoji to each sticker
+- Accepts a local folder path for batch sticker uploads
 - Restricts access to a single configured Telegram user
 - Accepts Telegram uploads or local file paths
 
@@ -75,6 +78,8 @@ The following environment variables are available:
 | `DEFAULT_FPS` | `30` | Output video frame rate, limited to 30 FPS |
 | `DEFAULT_DURATION` | `3` | Output video duration, limited to 3 seconds |
 | `MAX_EMOJI_SIZE_KB` | `256` | Maximum size of each rendered video emoji |
+| `MAX_STATIC_STICKER_SIZE_KB` | `512` | Maximum size of each converted static sticker |
+| `MAX_VIDEO_STICKER_SIZE_KB` | `256` | Maximum size of each converted video sticker |
 | `PACK_TITLE_SUFFIX` | `by @mohonovproduction` | Text automatically appended to pack titles |
 
 ## Running the bot
@@ -88,19 +93,39 @@ python -m app.bot
 
 The bot uses long polling, so the process must remain running while you use it.
 
+### Quick launch on macOS
+
+After installation, open `run-bot.command` with a double click in Finder. It starts
+the bot in Terminal and keeps the log window open if it stops.
+
+`TG ART Bot.app` is a Spotlight-friendly launcher. Move it to `/Applications` once:
+
+```bash
+cp -R "TG ART Bot.app" /Applications/
+```
+
+Then press `Command + Space`, type `TG ART Bot`, and press Enter. The app opens a
+Terminal window with the bot. The launcher expects this project to remain at
+`/Users/mohonovproduction/Documents/TG_ART_bot`.
+
 ## Usage
 
-1. Send `/start` to the bot.
-2. Upload an image or an alpha-channel video as a document. You can also send an absolute local file path, such as `/Users/me/Desktop/art.mov`.
-3. Enter the grid size in `columns x rows` format, for example `5x3`.
-4. Enter the display title of the emoji pack. The configured title suffix is added automatically.
-5. Enter a short link name using English letters, digits, and underscores. The required `_by_<bot_username>` suffix is added automatically.
-6. Send one emoji to associate with every item in the pack, for example `🎨`.
+1. Send `/start` and choose **TG Art** or **Стикер пак**.
+2. For **TG Art**, upload an image or an alpha-channel video as a document (or provide a local file path), enter the grid size, pack title, link name, and one emoji.
+3. For **Стикер пак**, choose **Статичные** or **Видео**.
+4. Send every source file as a document, or provide an absolute path to a folder on the computer running the bot. Send `/done` when the list is complete.
+5. Choose one common emoji or assign an emoji to every sticker in sequence, then enter the title and link name.
 
 After rendering, the bot sends a ZIP archive and creates a pack link similar to:
 
 ```text
 https://t.me/addemoji/example_by_bot
+```
+
+Regular sticker packs use a link such as:
+
+```text
+https://t.me/addstickers/example_by_bot
 ```
 
 Use `/cancel` at any point to stop the current operation.
@@ -126,11 +151,14 @@ Videos:
 - M4V
 - AVI
 
-Video files must contain an alpha channel. For reliable transparency, use ProRes 4444, FFV1 with alpha, or a compatible lossless source.
+TG Art video files must contain an alpha channel. For reliable transparency, use ProRes 4444, FFV1 with alpha, or a compatible lossless source.
+
+Regular video stickers are converted to WebM/VP9 without audio, with a maximum duration of 3 seconds and 30 FPS. Static stickers are converted to WebP. Both formats use a 512×512 canvas.
 
 ## Telegram limitations
 
 - A custom emoji pack can contain no more than 200 items.
+- A static sticker pack can contain no more than 120 items; a video sticker pack, no more than 50.
 - The grid can be between `1×1` and `20×20`, with no more than 200 total cells.
 - Telegram's cloud Bot API cannot download files larger than 20 MB. For larger files, send an absolute local path accessible from the machine running the bot.
 - Adding and using custom emoji packs generally requires Telegram Premium.
@@ -146,7 +174,7 @@ app/
 ├── config.py        # Environment configuration
 ├── media.py         # Media type detection and title helpers
 ├── renderer.py      # FFmpeg probing, slicing, and encoding
-└── sticker_pack.py  # Custom emoji pack creation
+└── sticker_pack.py  # Custom emoji and regular sticker pack creation
 tests/
 └── test_renderer.py # Unit tests
 ```
