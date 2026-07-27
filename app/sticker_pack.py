@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence, Union
 
 from aiogram.types import MessageEntity
 
@@ -14,25 +14,49 @@ if TYPE_CHECKING:
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 
+def parse_custom_emoji_pack_name(value: str) -> str:
+    """Extract a custom emoji pack name from its Telegram addemoji link."""
+    match = re.fullmatch(
+        r"\s*(?:https?://)?t\.me/addemoji/([A-Za-z][A-Za-z0-9_]{0,63})/?(?:\?[^\s#]*)?(?:#\S*)?\s*",
+        value,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise ValueError("Пришлите ссылку вида https://t.me/addemoji/pack_name")
+    return match.group(1)
+
+
 def build_tg_art_grid(
-    custom_emoji_ids: Sequence[str], columns: int, rows: int, fallback_emoji: str
+    custom_emoji_ids: Sequence[str],
+    columns: int,
+    rows: int,
+    fallback_emojis: Union[str, Sequence[str]],
 ) -> tuple[str, list[MessageEntity]]:
     """Build a row-major custom-emoji message matching the rendered grid.
 
-    Telegram requires each custom-emoji entity to wrap its regular emoji fallback.
+    Telegram requires each custom-emoji entity to wrap its own regular emoji fallback.
     """
     if (
         columns < 1
         or rows < 1
-        or not fallback_emoji
         or len(custom_emoji_ids) != columns * rows
     ):
         raise ValueError("Число custom emoji не соответствует размеру сетки")
 
+    emoji_fallbacks = (
+        [fallback_emojis] * len(custom_emoji_ids)
+        if isinstance(fallback_emojis, str)
+        else list(fallback_emojis)
+    )
+    if len(emoji_fallbacks) != len(custom_emoji_ids) or any(not emoji for emoji in emoji_fallbacks):
+        raise ValueError("Для каждого custom emoji нужен fallback-эмодзи")
+
     text_parts: list[str] = []
     entities: list[MessageEntity] = []
     offset = 0
-    for index, custom_emoji_id in enumerate(custom_emoji_ids):
+    for index, (custom_emoji_id, fallback_emoji) in enumerate(
+        zip(custom_emoji_ids, emoji_fallbacks)
+    ):
         text_parts.append(fallback_emoji)
         emoji_length = len(fallback_emoji.encode("utf-16-le")) // 2
         entities.append(

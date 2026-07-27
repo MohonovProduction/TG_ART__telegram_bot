@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import secrets
 import shutil
 from pathlib import Path
 from typing import Any, Dict
@@ -16,7 +17,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
+    CallbackQuery,
     FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -38,6 +42,7 @@ from app.sticker_pack import (
     create_custom_emoji_pack,
     create_sticker_pack,
     make_sticker_set_name,
+    parse_custom_emoji_pack_name,
     validate_pack_emoji,
     validate_pack_title,
 )
@@ -58,15 +63,18 @@ class RenderFlow(StatesGroup):
     waiting_for_sticker_pack_title = State()
     waiting_for_sticker_pack_name = State()
     waiting_for_video_note_source = State()
+    waiting_for_existing_tg_art_source = State()
+    waiting_for_existing_tg_art_grid = State()
 
 
 router = Router()
 settings: Settings
+tg_art_previews: Dict[str, Dict[str, Any]] = {}
 
 MODE_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
-        [KeyboardButton(text="⭕ Кружок из видео")],
+        [KeyboardButton(text="🧩 Собрать TG Art"), KeyboardButton(text="⭕ Кружок из видео")],
     ],
     resize_keyboard=True,
     one_time_keyboard=True,
@@ -141,6 +149,37 @@ async def _start_video_note(message: Message, state: FSMContext) -> None:
     )
 
 
+async def _start_existing_tg_art(message: Message, state: FSMContext) -> None:
+    await _reset_flow(state)
+    await state.set_state(RenderFlow.waiting_for_existing_tg_art_source)
+    await message.answer(
+        "Пришлите ссылку на emoji pack вида <code>https://t.me/addemoji/pack_name</code> "
+        "или отправьте custom emoji из этого пака. Затем я запрошу размер сетки.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def _set_existing_tg_art_pack(
+    message: Message, state: FSMContext, bot: Bot, pack_name: str
+) -> None:
+    sticker_set = await bot.get_sticker_set(pack_name)
+    stickers = [
+        {
+            "custom_emoji_id": sticker.custom_emoji_id,
+            "fallback_emoji": sticker.emoji or "▫️",
+        }
+        for sticker in sticker_set.stickers
+        if sticker.custom_emoji_id
+    ]
+    if not stickers:
+        raise ValueError("В этом наборе нет custom emoji")
+    await state.update_data(existing_tg_art_pack_name=pack_name, existing_tg_art_stickers=stickers)
+    await state.set_state(RenderFlow.waiting_for_existing_tg_art_grid)
+    await message.answer(
+        f"Найдено custom emoji: <b>{len(stickers)}</b>. Отправьте размер сетки, например <code>10x8</code>."
+    )
+
+
 async def _set_source(
     message: Message, state: FSMContext, source: Path, temporary: bool, source_kind: str
 ) -> None:
@@ -189,6 +228,21 @@ async def _ask_sticker_pack_title(message: Message, state: FSMContext) -> None:
     )
 
 
+async def _send_tg_art_preview(bot: Bot, chat_id: int, preview: Dict[str, Any]) -> None:
+    """Send the art only after the user has added the pack in Telegram."""
+    sticker_set = await bot.get_sticker_set(preview["pack_name"])
+    stickers = [sticker for sticker in sticker_set.stickers if sticker.custom_emoji_id]
+    custom_emoji_ids = [sticker.custom_emoji_id for sticker in stickers]
+    fallback_emojis = [sticker.emoji for sticker in stickers]
+    tg_art, entities = build_tg_art_grid(
+        custom_emoji_ids,
+        int(preview["columns"]),
+        int(preview["rows"]),
+        fallback_emojis,
+    )
+    await bot.send_message(chat_id, tg_art, entities=entities, parse_mode=None)
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
@@ -226,6 +280,14 @@ async def video_note_command(message: Message, state: FSMContext) -> None:
     await _start_video_note(message, state)
 
 
+@router.message(Command("tg_art"))
+async def existing_tg_art_command(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    await _start_existing_tg_art(message, state)
+
+
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
@@ -247,10 +309,106 @@ async def receive_mode(message: Message, state: FSMContext) -> None:
     if mode in {"🖼 стикер пак", "стикер пак", "стикеры", "стикер", "stickers", "sticker"}:
         await _start_sticker_pack(message, state)
         return
+    if mode in {"🧩 собрать tg art", "собрать tg art", "собрать арт", "tg art из пака"}:
+        await _start_existing_tg_art(message, state)
+        return
     if mode in {"⭕ кружок из видео", "кружок из видео", "кружок", "video note"}:
         await _start_video_note(message, state)
         return
     await message.answer("Выберите вариант кнопкой ниже.", reply_markup=MODE_KEYBOARD)
+
+
+@router.message(RenderFlow.waiting_for_existing_tg_art_source, F.text)
+async def receive_existing_tg_art_source(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    custom_emoji_ids = [
+        entity.custom_emoji_id
+        for entity in (message.entities or [])
+        if entity.type == "custom_emoji" and entity.custom_emoji_id
+    ]
+    try:
+        if custom_emoji_ids:
+            stickers = await bot.get_custom_emoji_stickers(custom_emoji_ids=[custom_emoji_ids[0]])
+            if not stickers or not stickers[0].set_name:
+                raise ValueError("Не удалось определить набор этого custom emoji")
+            pack_name = stickers[0].set_name
+        else:
+            pack_name = parse_custom_emoji_pack_name(message.text or "")
+        await _set_existing_tg_art_pack(message, state, bot, pack_name)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+    except TelegramAPIError as error:
+        await message.answer(
+            "Telegram не смог получить emoji pack. Проверьте ссылку или доступ к набору.\n\n"
+            f"Ошибка: <code>{html.escape(str(error)[:3000])}</code>"
+        )
+
+
+@router.message(RenderFlow.waiting_for_existing_tg_art_grid, F.text)
+async def receive_existing_tg_art_grid(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    match = re.fullmatch(r"\s*(\d{1,2})\s*[xх×]\s*(\d{1,2})\s*", message.text or "", re.I)
+    if not match:
+        await message.answer("Нужен формат <code>10x8</code>: столбцы × строки.")
+        return
+    columns, rows = map(int, match.groups())
+    cell_count = columns * rows
+    if not 1 <= columns <= 20 or not 1 <= rows <= 20 or cell_count > 200:
+        await message.answer("Размер сетки должен быть от 1×1 до 20×20 и содержать не более 200 ячеек.")
+        return
+    data = await state.get_data()
+    stickers = data["existing_tg_art_stickers"]
+    if len(stickers) != cell_count:
+        await message.answer(
+            f"В паке {len(stickers)} emoji, а в сетке {cell_count} ячеек. Повторяю emoji по кругу."
+        )
+    grid_stickers = [stickers[index % len(stickers)] for index in range(cell_count)]
+    custom_emoji_ids = [sticker["custom_emoji_id"] for sticker in grid_stickers]
+    fallback_emojis = [sticker["fallback_emoji"] for sticker in grid_stickers]
+    try:
+        tg_art, entities = build_tg_art_grid(custom_emoji_ids, columns, rows, fallback_emojis)
+        await message.answer(tg_art, entities=entities, parse_mode=None)
+    except TelegramAPIError as error:
+        await message.answer(f"Telegram не смог отправить TG Art:\n<code>{html.escape(str(error)[:3000])}</code>")
+        return
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("tg_art:"))
+async def send_tg_art_preview(callback: CallbackQuery, bot: Bot) -> None:
+    if not callback.from_user or callback.from_user.id != settings.allowed_user_id:
+        await callback.answer("Этот бот доступен только владельцу.", show_alert=True)
+        return
+    token = (callback.data or "").removeprefix("tg_art:")
+    preview = tg_art_previews.get(token)
+    if not preview or preview["user_id"] != callback.from_user.id:
+        await callback.answer("Срок действия кнопки истёк. Создайте TG Art заново.", show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer("Не удалось определить чат для отправки TG Art.", show_alert=True)
+        return
+    try:
+        await _send_tg_art_preview(bot, callback.message.chat.id, preview)
+    except TelegramAPIError as error:
+        await callback.answer("Telegram не смог отправить TG Art.", show_alert=True)
+        await bot.send_message(
+            callback.message.chat.id,
+            f"Не удалось отправить TG Art: <code>{html.escape(str(error)[:3000])}</code>",
+        )
+        return
+    except (ValueError, RuntimeError) as error:
+        await callback.answer("Не удалось собрать TG Art.", show_alert=True)
+        await bot.send_message(
+            callback.message.chat.id,
+            f"Не удалось собрать TG Art: <code>{html.escape(str(error)[:3000])}</code>",
+        )
+        return
+    await callback.answer()
 
 
 async def _render_and_send_video_note(
@@ -785,17 +943,29 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
             sticker_format="static" if source_kind == "image" else "video",
             progress=report_progress,
         )
+        preview_token = secrets.token_urlsafe(8)
+        tg_art_previews[preview_token] = {
+            "user_id": settings.allowed_user_id,
+            "pack_name": data["pack_name"],
+            "columns": columns,
+            "rows": rows,
+            "fallback_emoji": emoji,
+        }
         await status.edit_text(
-            f"Emoji pack создан: <a href=\"{pack_url}\">{html.escape(data['pack_title'])}</a>"
+            f"Emoji pack создан: <a href=\"{pack_url}\">{html.escape(data['pack_title'])}</a>\n\n"
+            "Добавьте пак в Telegram, затем нажмите «Показать TG Art».",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Добавить пак", url=pack_url)],
+                    [
+                        InlineKeyboardButton(
+                            text="🎨 Показать TG Art",
+                            callback_data=f"tg_art:{preview_token}",
+                        )
+                    ],
+                ]
+            ),
         )
-        sticker_set = await bot.get_sticker_set(data["pack_name"])
-        custom_emoji_ids = [
-            sticker.custom_emoji_id
-            for sticker in sticker_set.stickers
-            if sticker.custom_emoji_id
-        ]
-        tg_art, entities = build_tg_art_grid(custom_emoji_ids, columns, rows, emoji)
-        await message.answer(tg_art, entities=entities)
     except RenderError as error:
         await message.answer(f"Рендер не выполнен:\n<code>{html.escape(str(error)[:3500])}</code>")
     except TelegramAPIError as error:
@@ -833,6 +1003,7 @@ async def main() -> None:
         [
             BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
             BotCommand(command="sticker_pack", description="Создать стикерпак"),
+            BotCommand(command="tg_art", description="Собрать TG Art из emoji pack"),
             BotCommand(command="video_note", description="Сделать кружок из видео"),
             BotCommand(command="cancel", description="Отменить текущую операцию"),
         ]

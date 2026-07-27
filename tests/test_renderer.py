@@ -14,6 +14,7 @@ from app.media import append_title_suffix, detect_source_kind
 from app.sticker_pack import (
     build_tg_art_grid,
     make_sticker_set_name,
+    parse_custom_emoji_pack_name,
     validate_pack_emoji,
     validate_pack_title,
 )
@@ -50,12 +51,20 @@ class RendererTests(unittest.TestCase):
 
     def test_tg_art_grid_uses_custom_emoji_in_grid_order(self):
         text, entities = build_tg_art_grid(
-            ["one", "two", "three", "four"], 2, 2, "🎨"
+            ["one", "two", "three", "four"], 2, 2, ["🎨", "⭐", "❤️", "🔥"]
         )
 
-        self.assertEqual(text, "🎨🎨\n🎨🎨")
+        self.assertEqual(text, "🎨⭐\n❤️🔥")
         self.assertEqual([entity.custom_emoji_id for entity in entities], ["one", "two", "three", "four"])
-        self.assertEqual([(entity.offset, entity.length) for entity in entities], [(0, 2), (2, 2), (5, 2), (7, 2)])
+        self.assertEqual([(entity.offset, entity.length) for entity in entities], [(0, 2), (2, 1), (4, 2), (6, 2)])
+
+    def test_parse_custom_emoji_pack_link(self):
+        self.assertEqual(
+            parse_custom_emoji_pack_name("https://t.me/addemoji/My_Pack_by_Bot"),
+            "My_Pack_by_Bot",
+        )
+        with self.assertRaises(ValueError):
+            parse_custom_emoji_pack_name("https://t.me/addstickers/not_emoji")
 
     def test_prepare_stickers_rejects_unknown_format(self):
         with self.assertRaises(RenderError):
