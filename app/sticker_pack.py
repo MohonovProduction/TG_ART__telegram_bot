@@ -15,27 +15,35 @@ ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 
 def build_tg_art_grid(
-    custom_emoji_ids: Sequence[str], columns: int, rows: int
+    custom_emoji_ids: Sequence[str], columns: int, rows: int, fallback_emoji: str
 ) -> tuple[str, list[MessageEntity]]:
-    """Build a row-major custom-emoji message matching the rendered grid."""
-    if columns < 1 or rows < 1 or len(custom_emoji_ids) != columns * rows:
+    """Build a row-major custom-emoji message matching the rendered grid.
+
+    Telegram requires each custom-emoji entity to wrap its regular emoji fallback.
+    """
+    if (
+        columns < 1
+        or rows < 1
+        or not fallback_emoji
+        or len(custom_emoji_ids) != columns * rows
+    ):
         raise ValueError("Число custom emoji не соответствует размеру сетки")
 
-    placeholder = "\u25a0"
     text_parts: list[str] = []
     entities: list[MessageEntity] = []
     offset = 0
     for index, custom_emoji_id in enumerate(custom_emoji_ids):
-        text_parts.append(placeholder)
+        text_parts.append(fallback_emoji)
+        emoji_length = len(fallback_emoji.encode("utf-16-le")) // 2
         entities.append(
             MessageEntity(
                 type="custom_emoji",
                 offset=offset,
-                length=1,
+                length=emoji_length,
                 custom_emoji_id=custom_emoji_id,
             )
         )
-        offset += 1
+        offset += emoji_length
         if (index + 1) % columns == 0 and index + 1 < len(custom_emoji_ids):
             text_parts.append("\n")
             offset += 1

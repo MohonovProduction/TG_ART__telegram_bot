@@ -17,6 +17,7 @@ Static images are converted to `100×100` PNG files. Videos are converted to `10
 - Accepts a local folder path for batch sticker uploads
 - Restricts access to a single configured Telegram user
 - Accepts Telegram uploads or local file paths
+- Converts videos to Telegram video notes with sound and a centered square crop
 
 ## Requirements
 
@@ -110,11 +111,14 @@ Terminal window with the bot. The launcher expects this project to remain at
 
 ## Usage
 
-1. Send `/start` and choose **TG Art** or **Стикер пак**.
+1. Send `/start` and choose **TG Art**, **Стикер пак**, or **Кружок из видео**.
 2. For **TG Art**, upload an image or an alpha-channel video as a document (or provide a local file path), enter the grid size, pack title, link name, and one emoji.
 3. For **Стикер пак**, choose **Статичные** or **Видео**.
 4. Send every source file as a document, or provide an absolute path to a folder on the computer running the bot. Send `/done` when the list is complete.
 5. Choose one common emoji or assign an emoji to every sticker in sequence, then enter the title and link name.
+6. For a video note, send a Telegram video, a video as a document, or an absolute
+   local path. The bot center-crops it to a square, preserves sound, and uses the
+   first 60 seconds when the source is longer.
 
 After rendering, the bot sends a ZIP archive and creates a pack link similar to:
 
@@ -129,6 +133,9 @@ https://t.me/addstickers/example_by_bot
 ```
 
 Use `/cancel` at any point to stop the current operation.
+
+The Telegram command menu also provides `/emoji_pack`, `/sticker_pack`,
+`/video_note`, and `/cancel`.
 
 ## Supported source formats
 

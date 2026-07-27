@@ -14,12 +14,25 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    BotCommand,
+    FSInputFile,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
 from app.media import append_title_suffix, detect_source_kind
-from app.renderer import RenderError, prepare_sticker_files, render_grid, render_image_grid
+from app.renderer import (
+    RenderError,
+    prepare_sticker_files,
+    prepare_video_note,
+    render_grid,
+    render_image_grid,
+)
 from app.sticker_pack import (
     build_tg_art_grid,
     create_custom_emoji_pack,
@@ -44,13 +57,17 @@ class RenderFlow(StatesGroup):
     waiting_for_individual_sticker_emoji = State()
     waiting_for_sticker_pack_title = State()
     waiting_for_sticker_pack_name = State()
+    waiting_for_video_note_source = State()
 
 
 router = Router()
 settings: Settings
 
 MODE_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")]],
+    keyboard=[
+        [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
+        [KeyboardButton(text="⭕ Кружок из видео")],
+    ],
     resize_keyboard=True,
     one_time_keyboard=True,
 )
@@ -87,6 +104,41 @@ async def _cleanup_temporary_sources(data: Dict[str, Any]) -> None:
         Path(data["source"]).unlink(missing_ok=True)
     for source in data.get("temporary_sticker_sources", []):
         Path(source).unlink(missing_ok=True)
+    if data.get("video_note_temporary") and data.get("video_note_source"):
+        Path(data["video_note_source"]).unlink(missing_ok=True)
+
+
+async def _reset_flow(state: FSMContext) -> None:
+    await _cleanup_temporary_sources(await state.get_data())
+    await state.clear()
+
+
+async def _start_emoji_pack(message: Message, state: FSMContext) -> None:
+    await _reset_flow(state)
+    await state.set_state(RenderFlow.waiting_for_source)
+    await message.answer(
+        "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
+        "Также можно прислать полный локальный путь.\n\n"
+        "Например: <code>/Users/me/Desktop/art.png</code>",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def _start_sticker_pack(message: Message, state: FSMContext) -> None:
+    await _reset_flow(state)
+    await state.set_state(RenderFlow.waiting_for_sticker_kind)
+    await message.answer("Выберите тип стикеров.", reply_markup=STICKER_KIND_KEYBOARD)
+
+
+async def _start_video_note(message: Message, state: FSMContext) -> None:
+    await _reset_flow(state)
+    await state.set_state(RenderFlow.waiting_for_video_note_source)
+    await message.answer(
+        "Отправьте видео или видео <b>как файл</b>. Также можно прислать полный "
+        "локальный путь к видео.\n\nВидео будет обрезано по центру до квадрата. "
+        "Если оно длиннее 60 секунд, я возьму первые 60 секунд.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 async def _set_source(
@@ -142,7 +194,7 @@ async def start(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    await state.clear()
+    await _reset_flow(state)
     await state.set_state(RenderFlow.waiting_for_mode)
     await message.answer(
         "Что хотите создать?",
@@ -150,14 +202,36 @@ async def start(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(Command("emoji_pack"))
+async def emoji_pack_command(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    await _start_emoji_pack(message, state)
+
+
+@router.message(Command("sticker_pack"))
+async def sticker_pack_command(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    await _start_sticker_pack(message, state)
+
+
+@router.message(Command("video_note"))
+async def video_note_command(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    await _start_video_note(message, state)
+
+
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    data = await state.get_data()
-    await _cleanup_temporary_sources(data)
-    await state.clear()
+    await _reset_flow(state)
     await message.answer("Отменено. Используйте /start для нового рендера.")
 
 
@@ -168,21 +242,133 @@ async def receive_mode(message: Message, state: FSMContext) -> None:
         return
     mode = (message.text or "").strip().lower()
     if mode in {"🎨 tg art", "tg art", "art", "эмодзи", "emoji"}:
-        await state.set_state(RenderFlow.waiting_for_source)
-        await message.answer(
-            "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
-            "Также можно прислать полный локальный путь.\n\n"
-            "Например: <code>/Users/me/Desktop/art.png</code>"
-        )
+        await _start_emoji_pack(message, state)
         return
     if mode in {"🖼 стикер пак", "стикер пак", "стикеры", "стикер", "stickers", "sticker"}:
-        await state.set_state(RenderFlow.waiting_for_sticker_kind)
-        await message.answer(
-            "Выберите тип стикеров.",
-            reply_markup=STICKER_KIND_KEYBOARD,
-        )
+        await _start_sticker_pack(message, state)
+        return
+    if mode in {"⭕ кружок из видео", "кружок из видео", "кружок", "video note"}:
+        await _start_video_note(message, state)
         return
     await message.answer("Выберите вариант кнопкой ниже.", reply_markup=MODE_KEYBOARD)
+
+
+async def _render_and_send_video_note(
+    message: Message,
+    state: FSMContext,
+    source: Path,
+    temporary: bool,
+) -> None:
+    await state.update_data(
+        video_note_source=str(source),
+        video_note_temporary=temporary,
+    )
+    await message.answer("Готовлю кружок…")
+    result = None
+    try:
+        result = await prepare_video_note(source, settings.temp_dir)
+        if result.truncated:
+            await message.answer(
+                "Исходное видео длиннее 60 секунд — в кружок вошли первые 60 секунд."
+            )
+        await message.answer_video_note(
+            video_note=FSInputFile(result.file),
+            duration=max(1, round(result.duration)),
+            length=640,
+        )
+    except RenderError as error:
+        await message.answer(
+            f"Не удалось подготовить кружок:\n<code>{html.escape(str(error)[:3500])}</code>"
+        )
+    except TelegramAPIError as error:
+        await message.answer(
+            f"Telegram не смог отправить кружок:\n<code>{html.escape(str(error)[:3000])}</code>"
+        )
+    except Exception as error:
+        await message.answer(
+            f"Не удалось создать кружок:\n<code>{html.escape(str(error)[:3000])}</code>"
+        )
+    finally:
+        if result is not None:
+            shutil.rmtree(result.directory, ignore_errors=True)
+        if temporary:
+            source.unlink(missing_ok=True)
+        await state.clear()
+
+
+@router.message(RenderFlow.waiting_for_video_note_source, F.video)
+async def receive_video_note_video(
+    message: Message, state: FSMContext, bot: Bot
+) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    video = message.video
+    assert video is not None
+    destination = settings.temp_dir / f"{message.from_user.id}_{video.file_unique_id}.mp4"
+    try:
+        await bot.download(video, destination=destination)
+    except Exception as error:
+        destination.unlink(missing_ok=True)
+        await message.answer(
+            "Не удалось скачать видео через Bot API. Для большого файла пришлите "
+            "полный локальный путь.\n\n"
+            f"Ошибка: <code>{type(error).__name__}</code>"
+        )
+        return
+    await _render_and_send_video_note(message, state, destination, temporary=True)
+
+
+@router.message(RenderFlow.waiting_for_video_note_source, F.document)
+async def receive_video_note_document(
+    message: Message, state: FSMContext, bot: Bot
+) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    document = message.document
+    assert document is not None
+    suffix = Path(document.file_name or "video.mp4").suffix or ".mp4"
+    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}{suffix}"
+    try:
+        source_kind = detect_source_kind(destination, document.mime_type)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    if source_kind != "video":
+        await message.answer("Для кружка нужно отправить видео.")
+        return
+    try:
+        await bot.download(document, destination=destination)
+    except Exception as error:
+        destination.unlink(missing_ok=True)
+        await message.answer(
+            "Не удалось скачать файл через Bot API. Для большого файла пришлите "
+            "полный локальный путь.\n\n"
+            f"Ошибка: <code>{type(error).__name__}</code>"
+        )
+        return
+    await _render_and_send_video_note(message, state, destination, temporary=True)
+
+
+@router.message(RenderFlow.waiting_for_video_note_source, F.text)
+async def receive_video_note_path(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    source = Path((message.text or "").strip()).expanduser().resolve()
+    if not source.is_file():
+        await message.answer("Файл не найден. Проверьте полный путь и попробуйте ещё раз.")
+        return
+    try:
+        source_kind = detect_source_kind(source)
+    except ValueError as error:
+        await message.answer(html.escape(str(error)))
+        return
+    if source_kind != "video":
+        await message.answer("Для кружка нужен путь к видеофайлу.")
+        return
+    await _render_and_send_video_note(message, state, source, temporary=False)
 
 
 @router.message(RenderFlow.waiting_for_sticker_kind, F.text)
@@ -608,7 +794,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
             for sticker in sticker_set.stickers
             if sticker.custom_emoji_id
         ]
-        tg_art, entities = build_tg_art_grid(custom_emoji_ids, columns, rows)
+        tg_art, entities = build_tg_art_grid(custom_emoji_ids, columns, rows, emoji)
         await message.answer(tg_art, entities=entities)
     except RenderError as error:
         await message.answer(f"Рендер не выполнен:\n<code>{html.escape(str(error)[:3500])}</code>")
@@ -643,6 +829,14 @@ async def main() -> None:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("FFmpeg и ffprobe не найдены в PATH")
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    await bot.set_my_commands(
+        [
+            BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
+            BotCommand(command="sticker_pack", description="Создать стикерпак"),
+            BotCommand(command="video_note", description="Сделать кружок из видео"),
+            BotCommand(command="cancel", description="Отменить текущую операцию"),
+        ]
+    )
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
     await dispatcher.start_polling(bot)

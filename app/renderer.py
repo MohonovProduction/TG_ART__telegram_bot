@@ -37,6 +37,15 @@ class RenderResult:
     source_info: VideoInfo
 
 
+@dataclass(frozen=True)
+class VideoNoteResult:
+    directory: Path
+    file: Path
+    source_info: VideoInfo
+    duration: float
+    truncated: bool
+
+
 def _parse_fps(value: str) -> float:
     try:
         numerator, denominator = value.split("/", 1)
@@ -84,6 +93,69 @@ async def probe_video(source: Path, ffprobe: str = "ffprobe") -> VideoInfo:
         )
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise RenderError("Не удалось прочитать видеопоток исходника") from error
+
+
+async def prepare_video_note(
+    source: Path,
+    output_root: Path,
+    max_duration: float = 60.0,
+    length: int = 640,
+    max_size_mb: int = 47,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+) -> VideoNoteResult:
+    """Convert a video to a square MPEG-4 file suitable for sendVideoNote."""
+    if not source.is_file():
+        raise RenderError(f"Файл не найден: {source}")
+    if max_duration <= 0 or length < 2 or max_size_mb < 1:
+        raise RenderError("Некорректные параметры кружка")
+    if shutil.which(ffmpeg) is None or shutil.which(ffprobe) is None:
+        raise RenderError("FFmpeg и ffprobe должны быть доступны в PATH")
+
+    info = await probe_video(source, ffprobe)
+    if info.width < 2 or info.height < 2:
+        raise RenderError("Некорректный размер видеопотока")
+
+    duration = min(max_duration, info.duration) if info.duration > 0 else max_duration
+    truncated = info.duration > max_duration
+    output_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="video_note_", dir=output_root))
+    destination = directory / "video_note.mp4"
+    max_bytes = max_size_mb * 1024 * 1024
+    video_filter = (
+        "crop='min(iw\\,ih)':'min(iw\\,ih)':"
+        "'(iw-min(iw\\,ih))/2':'(ih-min(iw\\,ih))/2',"
+        f"scale={length}:{length}:flags=lanczos,fps=30,setsar=1,format=yuv420p"
+    )
+
+    try:
+        for crf in (23, 27, 31, 35, 39):
+            destination.unlink(missing_ok=True)
+            await _run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
+                    "-t", str(duration), "-vf", video_filter,
+                    "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+                    "-profile:v", "main", "-level", "3.1",
+                    "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                    "-movflags", "+faststart", str(destination),
+                ]
+            )
+            if destination.stat().st_size <= max_bytes:
+                return VideoNoteResult(
+                    directory=directory,
+                    file=destination,
+                    source_info=info,
+                    duration=duration,
+                    truncated=truncated,
+                )
+        raise RenderError(
+            f"Не удалось уменьшить кружок до лимита {max_size_mb} MB."
+        )
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
 
 
 def _tile_bounds(width: int, height: int, columns: int, rows: int, column: int, row: int):
