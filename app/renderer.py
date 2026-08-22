@@ -95,6 +95,47 @@ async def probe_video(source: Path, ffprobe: str = "ffprobe") -> VideoInfo:
         raise RenderError("Не удалось прочитать видеопоток исходника") from error
 
 
+async def convert_webp_to_png(
+    source: Path,
+    destination: Path,
+    ffmpeg: str = "ffmpeg",
+) -> Path:
+    """Convert a static Telegram sticker/custom emoji to transparent PNG."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    await _run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-map", "0:v:0", "-frames:v", "1",
+            "-vf", "format=rgba", "-c:v", "png", str(destination),
+        ]
+    )
+    return destination
+
+
+async def convert_webm_to_mov(
+    source: Path,
+    destination: Path,
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+) -> Path:
+    """Convert a Telegram VP9 video sticker/custom emoji to ProRes 4444 MOV."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    await _run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-c:v", "libvpx-vp9", "-i", str(source),
+            "-map", "0:v:0", "-an", "-c:v", "prores_ks",
+            "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
+            "-alpha_bits", "16", str(destination),
+        ]
+    )
+    info = await probe_video(destination, ffprobe)
+    if info.codec != "prores" or not info.has_alpha:
+        destination.unlink(missing_ok=True)
+        raise RenderError("Созданный MOV не содержит ожидаемый ProRes alpha-поток")
+    return destination
+
+
 async def prepare_video_note(
     source: Path,
     output_root: Path,

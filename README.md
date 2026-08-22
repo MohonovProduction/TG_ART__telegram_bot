@@ -18,6 +18,9 @@ Static images are converted to `100×100` PNG files. Videos are converted to `10
 - Restricts access to a single configured Telegram user
 - Accepts Telegram uploads or local file paths
 - Converts videos to Telegram video notes with sound and a centered square crop
+- Exports static stickers and custom emoji to transparent PNG in batches
+- Exports video and TGS stickers/custom emoji to alpha-channel ProRes 4444 MOV
+- Saves only finished PNG/MOV files to the default download folder or a custom path
 
 ## Requirements
 
@@ -76,6 +79,7 @@ The following environment variables are available:
 | `ALLOWED_USER_ID` | Required | The only Telegram user allowed to use the bot |
 | `OUTPUT_DIR` | `./output` | Directory for rendered tiles and ZIP archives |
 | `TEMP_DIR` | `./temp` | Directory for temporary uploaded files |
+| `DOWNLOAD_DIR` | `./downloads` | Default directory for downloaded sticker batches |
 | `DEFAULT_FPS` | `30` | Output video frame rate, limited to 30 FPS |
 | `DEFAULT_DURATION` | `3` | Output video duration, limited to 3 seconds |
 | `MAX_EMOJI_SIZE_KB` | `256` | Maximum size of each rendered video emoji |
@@ -109,6 +113,25 @@ Then press `Command + Space`, type `TG ART Bot`, and press Enter. The app opens 
 Terminal window with the bot. The launcher expects this project to remain at
 `/Users/mohonovproduction/Documents/TG_ART_bot`.
 
+When the bot is managed as a macOS background service, its logs are stored in
+`~/Library/Logs/TG_ART_bot/`.
+
+### Управление с iPhone
+
+После установки службы macOS бот можно запускать, останавливать и проверять через
+действие **«Запустить сценарий по SSH»** в приложении «Команды» на iPhone. Команды
+для действий соответственно:
+
+```bash
+/Users/mohonovproduction/Documents/TG_ART_bot/macos/tg-art-bot-service start
+/Users/mohonovproduction/Documents/TG_ART_bot/macos/tg-art-bot-service stop
+/Users/mohonovproduction/Documents/TG_ART_bot/macos/tg-art-bot-service status
+```
+
+На Mac предварительно включите «Удалённый вход» в **Системные настройки → Основные
+→ Общий доступ**. Для запуска из-за пределов домашней сети настройте защищённую
+сеть, например Tailscale; не открывайте SSH-порт в интернет напрямую.
+
 ## Usage
 
 1. Send `/start` and choose **TG Art**, **Стикер пак**, or **Кружок из видео**.
@@ -119,6 +142,17 @@ Terminal window with the bot. The launcher expects this project to remain at
 6. For a video note, send a Telegram video, a video as a document, or an absolute
    local path. The bot center-crops it to a square, preserves sound, and uses the
    first 60 seconds when the source is longer.
+7. For batch downloads, choose **Скачать стикеры / эмодзи**, select a local folder,
+   send stickers, custom emoji, or pack links, then press **Сохранить**. Finder paths
+   wrapped in single or double quotes are accepted.
+
+Static WebP assets are converted to transparent PNG. Video WebM assets are converted
+to ProRes 4444 MOV with alpha at their original resolution and frame rate. TGS assets
+are rendered only to MOV; their size can be selected as `×1`–`×4`, `512`, `1024`,
+`2048`, or a custom value from 64 to 4096 pixels. Repaintable custom emoji support a
+preset or custom HEX color, with white (`#FFFFFF`) as the default. Source and service
+files are kept under `TEMP_DIR` only while the operation is running and are removed
+afterward; the selected folder receives only completed PNG and MOV files.
 
 After rendering, the bot sends a ZIP archive and creates a pack link similar to:
 
@@ -135,7 +169,7 @@ https://t.me/addstickers/example_by_bot
 Use `/cancel` at any point to stop the current operation.
 
 The Telegram command menu also provides `/emoji_pack`, `/sticker_pack`,
-`/video_note`, and `/cancel`.
+`/video_note`, `/download`, and `/cancel`.
 
 ## Supported source formats
 
@@ -179,9 +213,13 @@ Rendered files remain in the configured output directory even after the ZIP arch
 app/
 ├── bot.py           # Telegram handlers and conversation flow
 ├── config.py        # Environment configuration
+├── download_flow.py # Batch sticker/custom emoji download conversation
 ├── media.py         # Media type detection and title helpers
+├── path_utils.py    # Local path parsing, including Finder-quoted paths
 ├── renderer.py      # FFmpeg probing, slicing, and encoding
-└── sticker_pack.py  # Custom emoji and regular sticker pack creation
+├── sticker_downloader.py # Download metadata and safe output filenames
+├── sticker_pack.py  # Custom emoji and regular sticker pack creation
+└── tgs_renderer.py  # TGS to alpha-channel ProRes 4444 MOV rendering
 tests/
 └── test_renderer.py # Unit tests
 ```

@@ -29,7 +29,11 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
+from app.download_flow import configure as configure_download_flow
+from app.download_flow import router as download_router
+from app.download_flow import start_download
 from app.media import append_title_suffix, detect_source_kind
+from app.path_utils import parse_local_path
 from app.renderer import (
     RenderError,
     prepare_sticker_files,
@@ -75,6 +79,7 @@ MODE_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
         [KeyboardButton(text="🧩 Собрать TG Art"), KeyboardButton(text="⭕ Кружок из видео")],
+        [KeyboardButton(text="📥 Скачать стикеры / эмодзи")],
     ],
     resize_keyboard=True,
     one_time_keyboard=True,
@@ -315,6 +320,14 @@ async def receive_mode(message: Message, state: FSMContext) -> None:
     if mode in {"⭕ кружок из видео", "кружок из видео", "кружок", "video note"}:
         await _start_video_note(message, state)
         return
+    if mode in {
+        "📥 скачать стикеры / эмодзи",
+        "скачать стикеры / эмодзи",
+        "скачать стикеры",
+        "download",
+    }:
+        await start_download(message, state)
+        return
     await message.answer("Выберите вариант кнопкой ниже.", reply_markup=MODE_KEYBOARD)
 
 
@@ -514,7 +527,7 @@ async def receive_video_note_path(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    source = Path((message.text or "").strip()).expanduser().resolve()
+    source = parse_local_path(message.text or "")
     if not source.is_file():
         await message.answer("Файл не найден. Проверьте полный путь и попробуйте ещё раз.")
         return
@@ -597,7 +610,7 @@ async def receive_sticker_folder(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    folder = Path((message.text or "").strip()).expanduser().resolve()
+    folder = parse_local_path(message.text or "")
     if not folder.is_dir():
         await message.answer("Отправьте файл, путь к папке или /done.")
         return
@@ -800,7 +813,7 @@ async def receive_path(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    source = Path((message.text or "").strip()).expanduser().resolve()
+    source = parse_local_path(message.text or "")
     if not source.is_file():
         await message.answer("Файл не найден. Проверьте полный путь и попробуйте ещё раз.")
         return
@@ -996,6 +1009,7 @@ async def fallback(message: Message) -> None:
 async def main() -> None:
     global settings
     settings = Settings.from_env()
+    configure_download_flow(settings)
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("FFmpeg и ffprobe не найдены в PATH")
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -1005,10 +1019,12 @@ async def main() -> None:
             BotCommand(command="sticker_pack", description="Создать стикерпак"),
             BotCommand(command="tg_art", description="Собрать TG Art из emoji pack"),
             BotCommand(command="video_note", description="Сделать кружок из видео"),
+            BotCommand(command="download", description="Скачать стикеры и эмодзи"),
             BotCommand(command="cancel", description="Отменить текущую операцию"),
         ]
     )
     dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher.include_router(download_router)
     dispatcher.include_router(router)
     await dispatcher.start_polling(bot)
 

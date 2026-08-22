@@ -1,0 +1,30 @@
+#!/bin/zsh
+
+# Управление фоновым ботом. Подходит для локального Terminal и запуска по SSH.
+set -eu
+
+LABEL="local.mohonovproduction.tg-art-bot"
+DOMAIN="gui/$(id -u)"
+SERVICE="$DOMAIN/$LABEL"
+
+case "${1:-}" in
+  start)
+    launchctl kickstart -k "$SERVICE"
+    print "TG ART Bot запущен."
+    ;;
+  stop)
+    launchctl kill SIGTERM "$SERVICE"
+    print "TG ART Bot остановлен."
+    ;;
+  restart)
+    launchctl kickstart -k "$SERVICE"
+    print "TG ART Bot перезапущен."
+    ;;
+  status)
+    launchctl print "$SERVICE"
+    ;;
+  *)
+    print "Использование: ${0:t} {start|stop|restart|status}"
+    exit 64
+    ;;
+esac
