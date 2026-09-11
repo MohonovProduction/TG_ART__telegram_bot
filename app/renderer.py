@@ -254,29 +254,66 @@ async def _encode_sticker_video(
     max_bytes: int,
     ffmpeg: str,
 ) -> None:
-    """Convert an arbitrary source video into a Telegram video sticker."""
-    attempts = (28, 32, 36, 40, 44, 48, 52)
-    video_filter = (
-        "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,"
-        "pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0,"
-        f"fps={min(30, fps)},setsar=1,format=yuva420p"
-    )
-    for crf in attempts:
-        destination.unlink(missing_ok=True)
-        await _run(
-            [
-                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(source), "-map", "0:v:0", "-an", "-t", str(duration),
-                "-vf", video_filter, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
-                "-b:v", "0", "-crf", str(crf), "-deadline", "good", "-cpu-used", "2",
-                "-row-mt", "1", "-auto-alt-ref", "0", "-metadata:s:v:0", "alpha_mode=1",
-                str(destination),
-            ]
+    """Convert an arbitrary source video into a Telegram video sticker.
+
+    Keep the full 512 px canvas and requested frame rate whenever possible.  CRF is
+    binary-searched so the first accepted result uses the lowest (best) CRF that
+    fits.  Only files which cannot fit even at CRF 63 lose frame rate or visible
+    content size.
+    """
+    requested_fps = min(30, fps)
+    profiles = [(requested_fps, 512)]
+    profiles.extend((fallback_fps, 512) for fallback_fps in (24, 20, 15, 12)
+                    if fallback_fps < requested_fps)
+    profiles.extend((requested_fps, side) for side in (480, 448, 416, 384, 352, 320))
+
+    for profile_fps, content_size in profiles:
+        video_filter = (
+            f"scale={content_size}:{content_size}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            "pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+            f"fps={profile_fps},setsar=1,format=yuva420p"
         )
-        if destination.stat().st_size <= max_bytes:
-            return
+        # VP9's output size is monotonic enough in CRF for a binary search. This
+        # avoids a long linear ladder while still choosing the best fitting CRF.
+        low, high = 28, 63
+        best_crf: Optional[int] = None
+        while low <= high:
+            crf = (low + high) // 2
+            destination.unlink(missing_ok=True)
+            await _run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(source), "-map", "0:v:0", "-an", "-t", str(duration),
+                    "-vf", video_filter, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                    "-b:v", "0", "-crf", str(crf), "-deadline", "good", "-cpu-used", "2",
+                    "-row-mt", "1", "-auto-alt-ref", "0", "-metadata:s:v:0", "alpha_mode=1",
+                    str(destination),
+                ]
+            )
+            if destination.stat().st_size <= max_bytes:
+                best_crf = crf
+                high = crf - 1
+            else:
+                low = crf + 1
+        if best_crf is not None:
+            # The last successful file may be from an earlier midpoint; encode the
+            # exact best CRF so the output and the selected quality always match.
+            destination.unlink(missing_ok=True)
+            await _run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(source), "-map", "0:v:0", "-an", "-t", str(duration),
+                    "-vf", video_filter, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                    "-b:v", "0", "-crf", str(best_crf), "-deadline", "good", "-cpu-used", "2",
+                    "-row-mt", "1", "-auto-alt-ref", "0", "-metadata:s:v:0", "alpha_mode=1",
+                    str(destination),
+                ]
+            )
+            if destination.stat().st_size <= max_bytes:
+                return
     raise RenderError(
-        f"{source.name} не удалось уменьшить до {max_bytes // 1024} KB."
+        f"{source.name} не удалось уменьшить до {max_bytes // 1024} KB даже после "
+        "снижения FPS и размера анимации."
     )
 
 

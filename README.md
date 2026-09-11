@@ -194,7 +194,7 @@ Videos:
 
 TG Art video files must contain an alpha channel. For reliable transparency, use ProRes 4444, FFV1 with alpha, or a compatible lossless source.
 
-Regular video stickers are converted to WebM/VP9 without audio, with a maximum duration of 3 seconds and 30 FPS. Static stickers are converted to WebP. Both formats use a 512×512 canvas.
+Regular video stickers are converted to WebM/VP9 without audio, with a maximum duration of 3 seconds and 30 FPS. The encoder chooses the highest fitting quality for the 256 KB limit; only if necessary does it reduce FPS and then the visible animation size within the 512×512 canvas. Static stickers are converted to WebP. Both formats use a 512×512 canvas.
 
 ## Telegram limitations
 
