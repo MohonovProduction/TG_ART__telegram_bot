@@ -1,0 +1,27 @@
+name: tg-art-cloud
+
+services:
+  bot:
+    build: .
+    image: tg-art-bot:latest
+    env_file:
+      - .env.cloud
+    environment:
+      ACCESS_DB: /data/access.sqlite3
+      ALLOW_LOCAL_PATHS: "false"
+      OUTPUT_DIR: /data/output
+      TEMP_DIR: /data/temp
+      DOWNLOAD_DIR: /data/downloads
+    volumes:
+      - bot-data:/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:

@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from app.config import Settings
+from app import access
 from app.path_utils import parse_local_path
 from app.renderer import convert_webm_to_mov, convert_webp_to_png
 from app.sticker_downloader import (
@@ -80,7 +81,7 @@ def configure(value: Settings) -> None:
 
 
 def _allowed(message: Message) -> bool:
-    return bool(message.from_user and message.from_user.id == settings.allowed_user_id)
+    return bool(message.from_user and access.allowed(message.from_user.id))
 
 
 async def _reject(message: Message) -> None:
@@ -97,6 +98,9 @@ async def _edit_progress(status: Message, text: str) -> bool:
 
 async def start_download(message: Message, state: FSMContext) -> None:
     await state.clear()
+    if not settings.allow_local_paths or message.from_user.id != settings.allowed_user_id:
+        await _begin_collection(message, state, settings.download_dir / str(message.from_user.id))
+        return
     await state.set_state(DownloadFlow.waiting_for_destination)
     await message.answer(
         "Куда сохранить пачку? Файлы до 50 MB я также отправлю в этот чат.",
@@ -156,6 +160,9 @@ async def receive_destination(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
+    if not settings.allow_local_paths or message.from_user.id != settings.allowed_user_id:
+        await _begin_collection(message, state, settings.download_dir / str(message.from_user.id))
+        return
     value = (message.text or "").strip().lower()
     if value == "❌ отмена":
         await state.clear()
@@ -177,6 +184,9 @@ async def receive_destination(message: Message, state: FSMContext) -> None:
 async def receive_destination_path(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
+        return
+    if not settings.allow_local_paths or message.from_user.id != settings.allowed_user_id:
+        await message.answer("Выбор локальной папки недоступен.")
         return
     try:
         destination = _ensure_destination(parse_local_path(message.text or ""))

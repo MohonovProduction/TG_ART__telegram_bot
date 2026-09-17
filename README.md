@@ -1,6 +1,6 @@
 # TG ART Bot
 
-A personal Telegram bot that creates custom-emoji art grids and ordinary static or video sticker packs.
+A Telegram bot that creates custom-emoji art grids and ordinary static or video sticker packs.
 
 Static images are converted to `100×100` PNG files. Videos are converted to `100×100` WebM/VP9 files with transparency, a maximum frame rate of 30 FPS, a maximum duration of 3 seconds, and no audio.
 
@@ -15,7 +15,9 @@ Static images are converted to `100×100` PNG files. Videos are converted to `10
 - Creates ordinary static and video sticker packs from a batch of files
 - Lets you assign one emoji to all stickers or an individual emoji to each sticker
 - Accepts a local folder path for batch sticker uploads
-- Restricts access to a single configured Telegram user
+- Restricts access through a persistent allowlist with owner, administrator, and user roles
+- Supports a 12×12 reply keyboard for selecting and confirming grids
+- Suggests transliterated link names and alternatives when a name is taken
 - Accepts Telegram uploads or local file paths
 - Converts videos to Telegram video notes with sound and a centered square crop
 - Exports static stickers and custom emoji to transparent PNG in batches
@@ -76,7 +78,10 @@ The following environment variables are available:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BOT_TOKEN` | Required | Telegram bot token issued by BotFather |
-| `ALLOWED_USER_ID` | Required | The only Telegram user allowed to use the bot |
+| `ALLOWED_USER_ID` | Required | Owner Telegram ID; other users are managed with `/users` |
+| `ACCESS_DB` | `./data/access.sqlite3` | Persistent user and role database |
+| `ALLOW_LOCAL_PATHS` | `true` | Enables local filesystem paths for the owner; disabled in Compose |
+| `MAX_CONCURRENT_JOBS` | `2` | Maximum simultaneous request handlers |
 | `OUTPUT_DIR` | `./output` | Directory for rendered tiles and ZIP archives |
 | `TEMP_DIR` | `./temp` | Directory for temporary uploaded files |
 | `DOWNLOAD_DIR` | `./downloads` | Default directory for downloaded sticker batches |
@@ -98,7 +103,64 @@ python -m app.bot
 
 The bot uses long polling, so the process must remain running while you use it.
 
-### Quick launch on macOS
+### Docker: отдельный бот с новым токеном
+
+Для сборки и запуска контейнера на Mac установите и запустите
+[Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/).
+Обычный запуск через `run-bot.command` не требует Docker и продолжает использовать
+старый токен из `.env`.
+
+Создайте отдельную конфигурацию контейнера:
+
+```bash
+cp .env.cloud.example .env.cloud
+```
+
+В `.env.cloud` укажите **новый** `BOT_TOKEN` и свой `ALLOWED_USER_ID`.
+Затем выполните из каталога проекта:
+
+```bash
+docker compose up -d --build
+docker compose logs -f --tail=100 bot
+```
+
+Остановить контейнер:
+
+```bash
+docker compose down
+```
+
+Исходники общие, но два бота используют разные токены и разные каталоги данных.
+Личный бот и контейнер можно запускать одновременно. Для одного токена должен
+работать только один polling-процесс. Токены не входят в образ: Docker копирует
+только `app/` и `requirements.txt`; `.env.cloud` передаётся при запуске.
+
+FFmpeg устанавливается в образ автоматически. Контейнер работает от обычного
+пользователя, без входящих портов. Файлы сохраняются в Docker volume `bot-data`
+под `/data`; `docker compose down` его сохраняет, а `docker compose down -v`
+удаляет вместе с файлами. Volume необходимо резервировать отдельно от образа.
+
+Все текущие функции включены. Локальные пути внутри контейнера относятся к его
+файловой системе, а не к Mac: отправляйте исходники через Telegram. Экспорт
+сохраняется в `/data/downloads` и отправляется в чат в пределах существующего
+лимита отправки. Через стандартный Bot API нельзя скачать входящий файл больше
+20 MB. Папки Mac автоматически не подключаются.
+
+Владелец задаётся через `ALLOWED_USER_ID`. Пользователи и роли сохраняются
+в `/data/access.sqlite3`; локальный бот использует отдельную базу `./data/access.sqlite3`.
+После перезапуска незавершённые диалоги и
+кнопки предпросмотра сбрасываются: используйте `/start`; созданные паки и файлы
+в volume сохраняются.
+
+Для будущей машины Linux amd64 можно собрать отдельный образ:
+
+```bash
+docker buildx build --platform linux/amd64 -t tg-art-bot:amd64 --load .
+```
+
+Развёртывание в Yandex Cloud на этом этапе не выполняется.
+
+### Локальный запуск на macOS
 
 After installation, open `run-bot.command` with a double click in Finder. It starts
 the bot in Terminal and keeps the log window open if it stops.
@@ -170,6 +232,39 @@ Use `/cancel` at any point to stop the current operation.
 
 The Telegram command menu also provides `/emoji_pack`, `/sticker_pack`,
 `/video_note`, `/download`, and `/cancel`.
+
+## Управление доступом и новые сценарии
+
+Команда `/users` открывает список пользователей и меню управления:
+
+- Владелец добавляет пользователей, назначает администраторов и отзывает доступ.
+- Администратор добавляет обычных пользователей и отзывает их доступ; менять других администраторов он не может.
+- Пользователь имеет доступ ко всем функциям обработки медиа.
+
+После выбора действия отправьте числовой Telegram ID или контакт, в котором
+Telegram передал `user_id`. Контакт только с номером телефона не подходит.
+Затем пользователь самостоятельно открывает бота и отправляет `/start`.
+Владелец не может быть удалён или понижен. Работа поддерживается в личных чатах.
+
+При создании или выводе TG Art выберите правый нижний угол на клавиатуре под
+полем ввода: `7×5` означает 7 столбцов и 5 строк. Прямоугольник от верхнего
+левого угла подсвечивается зелёным цветом кнопок (`style="success"`), после чего требуется подтверждение.
+Каждая клетка содержит координаты, поскольку reply-кнопки передают текст,
+а не отдельные данные нажатия. Размер можно ввести вручную, до 20×20 и 200
+ячеек. Кнопка вывода после создания пака также предлагает выбор сетки.
+Если число ячеек отличается от количества emoji в паке, элементы повторяются
+по кругу или используются первые элементы.
+
+После названия пака бот предлагает имя ссылки с транслитерацией:
+`Летний арт` → `letniy_art_by_<bot_username>`. Можно принять кнопку или ввести
+своё имя. При занятом имени предлагается вариант с номером. Проверка доступности
+не гарантирует, что имя не займут до создания пака: ошибку Telegram бот покажет в чате.
+
+Локальные пути доступны только владельцу при `ALLOW_LOCAL_PATHS=true`.
+Остальные пользователи загружают файлы через Telegram; скачанные результаты
+сохраняются в отдельных папках по ID и отправляются в чат. Рендеры также
+сохраняются в отдельных папках пользователей. Одновременная обработка ограничена
+`MAX_CONCURRENT_JOBS`; повторные запросы во время обработки отклоняются с пояснением.
 
 ## Supported source formats
 

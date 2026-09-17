@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!.env.cloud.example
 .DS_Store
 .idea/
 .venv/
@@ -10,3 +13,5 @@ output/
 temp/
 logs/
 downloads/
+
+data/

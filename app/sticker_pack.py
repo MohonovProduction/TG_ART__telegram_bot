@@ -202,3 +202,15 @@ async def create_sticker_pack(
 
     link_type = "addemoji" if sticker_type == "custom_emoji" else "addstickers"
     return f"https://t.me/{link_type}/{name}"
+
+
+def suggest_pack_name(title: str) -> str:
+    """Transliterate a display title without relying on an external service."""
+    letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
+    replacements = ['a','b','v','g','d','e','yo','zh','z','i','y','k','l','m','n','o','p','r','s','t','u','f','kh','ts','ch','sh','shch','','y','','e','yu','ya']
+    table = dict(zip(letters, replacements))
+    text = ''.join(table.get(char, char) for char in title.lower())
+    base = re.sub(r'[^a-z0-9]+', '_', text).strip('_') or 'art'
+    if not base[0].isalpha():
+        base = 'art_' + base
+    return base

@@ -17,6 +17,9 @@ class Settings:
     output_dir: Path
     temp_dir: Path
     download_dir: Path
+    access_db: Path = PROJECT_ROOT / "data/access.sqlite3"
+    allow_local_paths: bool = True
+    max_concurrent_jobs: int = 2
     default_fps: int = 30
     default_duration: float = 3.0
     max_emoji_size_kb: int = 256
@@ -39,6 +42,9 @@ class Settings:
             return path if path.is_absolute() else PROJECT_ROOT / path
 
         settings = cls(
+            access_db=project_path("ACCESS_DB", "./data/access.sqlite3").resolve(),
+            allow_local_paths=os.getenv("ALLOW_LOCAL_PATHS", "true").lower() == "true",
+            max_concurrent_jobs=max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2"))),
             bot_token=token,
             allowed_user_id=int(user_id),
             output_dir=project_path("OUTPUT_DIR", "./output").resolve(),

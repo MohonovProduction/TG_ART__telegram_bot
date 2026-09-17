@@ -29,6 +29,11 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
+from app import access, admin
+from app.admin import router as admin_router
+from app.pack_names import available_pack_name
+from app.grid_keyboard import grid_keyboard, confirmed_grid
+from app.sticker_pack import suggest_pack_name
 from app.download_flow import configure as configure_download_flow
 from app.download_flow import router as download_router
 from app.download_flow import start_download
@@ -97,11 +102,11 @@ EMOJI_MODE_KEYBOARD = ReplyKeyboardMarkup(
 
 
 def _allowed(message: Message) -> bool:
-    return bool(message.from_user and message.from_user.id == settings.allowed_user_id)
+    return bool(message.from_user and access.allowed(message.from_user.id))
 
 
 async def _reject(message: Message) -> None:
-    await message.answer("Этот локальный бот доступен только владельцу.")
+    await message.answer("Доступ закрыт. Обратитесь к владельцу бота.")
 
 
 def _sticker_limit(sticker_format: str) -> int:
@@ -131,8 +136,8 @@ async def _start_emoji_pack(message: Message, state: FSMContext) -> None:
     await state.set_state(RenderFlow.waiting_for_source)
     await message.answer(
         "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
-        "Также можно прислать полный локальный путь.\n\n"
-        "Например: <code>/Users/me/Desktop/art.png</code>",
+        + ("Также можно прислать полный локальный путь.\n\n"
+        "Например: <code>/Users/me/Desktop/art.png</code>" if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else ""),
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -147,8 +152,9 @@ async def _start_video_note(message: Message, state: FSMContext) -> None:
     await _reset_flow(state)
     await state.set_state(RenderFlow.waiting_for_video_note_source)
     await message.answer(
-        "Отправьте видео или видео <b>как файл</b>. Также можно прислать полный "
-        "локальный путь к видео.\n\nВидео будет обрезано по центру до квадрата. "
+        "Отправьте видео или видео <b>как файл</b>. "
+        + ("Также можно прислать полный локальный путь к видео. " if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else "")
+        + "\n\nВидео будет обрезано по центру до квадрата. "
         "Если оно длиннее 60 секунд, я возьму первые 60 секунд.",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -181,7 +187,8 @@ async def _set_existing_tg_art_pack(
     await state.update_data(existing_tg_art_pack_name=pack_name, existing_tg_art_stickers=stickers)
     await state.set_state(RenderFlow.waiting_for_existing_tg_art_grid)
     await message.answer(
-        f"Найдено custom emoji: <b>{len(stickers)}</b>. Отправьте размер сетки, например <code>10x8</code>."
+        f"Найдено custom emoji: <b>{len(stickers)}</b>. Выберите правый нижний угол сетки или введите <code>10x8</code>.",
+        reply_markup=grid_keyboard()
     )
 
 
@@ -192,7 +199,8 @@ async def _set_source(
     await state.set_state(RenderFlow.waiting_for_grid)
     await message.answer(
         "Исходник принят. Отправьте размер сетки в формате <code>5x3</code> "
-        "(столбцы × строки)."
+        "(столбцы × строки), либо выберите правый нижний угол кнопкой.",
+        reply_markup=grid_keyboard()
     )
 
 
@@ -205,8 +213,9 @@ async def _start_sticker_collection(message: Message, state: FSMContext, sticker
     await state.set_state(RenderFlow.collecting_stickers)
     source_kind = "изображения" if sticker_format == "static" else "видео"
     await message.answer(
-        f"Отправляйте {source_kind} как файлы. Можно прислать несколько сообщений или "
-        "указать путь к папке на компьютере с ботом. Когда закончите, отправьте /done.",
+        f"Отправляйте {source_kind} как файлы. Можно прислать несколько сообщений. "
+        + ("Также можно указать путь к папке на компьютере с ботом. " if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else "")
+        + "Когда закончите, отправьте /done.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -364,15 +373,11 @@ async def receive_existing_tg_art_grid(message: Message, state: FSMContext, bot:
     if not _allowed(message):
         await _reject(message)
         return
-    match = re.fullmatch(r"\s*(\d{1,2})\s*[xх×]\s*(\d{1,2})\s*", message.text or "", re.I)
-    if not match:
-        await message.answer("Нужен формат <code>10x8</code>: столбцы × строки.")
+    selection = await confirmed_grid(message, state)
+    if selection is None:
         return
-    columns, rows = map(int, match.groups())
+    columns, rows = selection
     cell_count = columns * rows
-    if not 1 <= columns <= 20 or not 1 <= rows <= 20 or cell_count > 200:
-        await message.answer("Размер сетки должен быть от 1×1 до 20×20 и содержать не более 200 ячеек.")
-        return
     data = await state.get_data()
     stickers = data["existing_tg_art_stickers"]
     if len(stickers) != cell_count:
@@ -384,7 +389,7 @@ async def receive_existing_tg_art_grid(message: Message, state: FSMContext, bot:
     fallback_emojis = [sticker["fallback_emoji"] for sticker in grid_stickers]
     try:
         tg_art, entities = build_tg_art_grid(custom_emoji_ids, columns, rows, fallback_emojis)
-        await message.answer(tg_art, entities=entities, parse_mode=None)
+        await message.answer(tg_art, entities=entities, parse_mode=None, reply_markup=ReplyKeyboardRemove())
     except TelegramAPIError as error:
         await message.answer(f"Telegram не смог отправить TG Art:\n<code>{html.escape(str(error)[:3000])}</code>")
         return
@@ -393,8 +398,8 @@ async def receive_existing_tg_art_grid(message: Message, state: FSMContext, bot:
 
 
 @router.callback_query(F.data.startswith("tg_art:"))
-async def send_tg_art_preview(callback: CallbackQuery, bot: Bot) -> None:
-    if not callback.from_user or callback.from_user.id != settings.allowed_user_id:
+async def send_tg_art_preview(callback: CallbackQuery, bot: Bot, state: FSMContext) -> None:
+    if not callback.from_user or not access.allowed(callback.from_user.id):
         await callback.answer("Этот бот доступен только владельцу.", show_alert=True)
         return
     token = (callback.data or "").removeprefix("tg_art:")
@@ -406,7 +411,14 @@ async def send_tg_art_preview(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Не удалось определить чат для отправки TG Art.", show_alert=True)
         return
     try:
-        await _send_tg_art_preview(bot, callback.message.chat.id, preview)
+        await _reset_flow(state)
+        await _set_existing_tg_art_pack(callback.message, state, bot, preview["pack_name"])
+        columns, rows = int(preview["columns"]), int(preview["rows"])
+        await state.update_data(pending_grid=[columns, rows])
+        await callback.message.answer(
+            f"Исходная сетка {columns}×{rows}. Подтвердите её или выберите другую клетку.",
+            reply_markup=grid_keyboard(columns, rows),
+        )
     except TelegramAPIError as error:
         await callback.answer("Telegram не смог отправить TG Art.", show_alert=True)
         await bot.send_message(
@@ -476,7 +488,7 @@ async def receive_video_note_video(
         return
     video = message.video
     assert video is not None
-    destination = settings.temp_dir / f"{message.from_user.id}_{video.file_unique_id}.mp4"
+    destination = settings.temp_dir / f"{message.from_user.id}_{video.file_unique_id}_{secrets.token_hex(6)}.mp4"
     try:
         await bot.download(video, destination=destination)
     except Exception as error:
@@ -500,7 +512,7 @@ async def receive_video_note_document(
     document = message.document
     assert document is not None
     suffix = Path(document.file_name or "video.mp4").suffix or ".mp4"
-    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}{suffix}"
+    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}_{secrets.token_hex(6)}{suffix}"
     try:
         source_kind = detect_source_kind(destination, document.mime_type)
     except ValueError as error:
@@ -526,6 +538,9 @@ async def receive_video_note_document(
 async def receive_video_note_path(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
+        return
+    if not settings.allow_local_paths or message.from_user.id != settings.allowed_user_id:
+        await message.answer("Отправьте исходник как файл через Telegram; локальные пути недоступны.")
         return
     source = parse_local_path(message.text or "")
     if not source.is_file():
@@ -581,7 +596,7 @@ async def receive_sticker_document(message: Message, state: FSMContext, bot: Bot
         return
 
     suffix = Path(document.file_name or "sticker").suffix
-    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}{suffix}"
+    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}_{secrets.token_hex(6)}{suffix}"
     try:
         source_kind = detect_source_kind(destination, document.mime_type)
     except ValueError as error:
@@ -609,6 +624,9 @@ async def receive_sticker_document(message: Message, state: FSMContext, bot: Bot
 async def receive_sticker_folder(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
+        return
+    if not settings.allow_local_paths or message.from_user.id != settings.allowed_user_id:
+        await message.answer("Отправьте исходник как файл через Telegram; локальные пути недоступны.")
         return
     folder = parse_local_path(message.text or "")
     if not folder.is_dir():
@@ -693,6 +711,23 @@ async def receive_individual_sticker_emoji(message: Message, state: FSMContext) 
     await message.answer(f"Отправьте эмодзи для стикера {len(emojis) + 1} из {total}.")
 
 
+async def _suggest_name(message: Message, state: FSMContext) -> None:
+    base = suggest_pack_name(message.text or "")
+    # Apply the existing Telegram name constraints before displaying the suggestion.
+    me = await message.bot.get_me()
+    if not me.username:
+        await message.answer("У бота должен быть username. Укажите его в @BotFather.")
+        return
+    try:
+        name = await available_pack_name(message.bot, base, me.username)
+    except (TelegramAPIError, ValueError):
+        name = make_sticker_set_name(base, me.username)
+    await message.answer(
+        f"Предлагаю имя ссылки: <code>{html.escape(name)}</code>. Примите кнопкой или введите своё.",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=name)]], resize_keyboard=True, one_time_keyboard=True),
+    )
+
+
 @router.message(RenderFlow.waiting_for_sticker_pack_title, F.text)
 async def receive_sticker_pack_title(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
@@ -705,7 +740,7 @@ async def receive_sticker_pack_title(message: Message, state: FSMContext) -> Non
         return
     await state.update_data(sticker_pack_title=title)
     await state.set_state(RenderFlow.waiting_for_sticker_pack_name)
-    await message.answer("Введите короткое имя ссылки, например <code>my_stickers</code>.")
+    await _suggest_name(message, state)
 
 
 @router.message(RenderFlow.waiting_for_sticker_pack_name, F.text)
@@ -718,20 +753,28 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
         await message.answer("У бота должен быть username. Задайте его через @BotFather.")
         return
     try:
-        pack_name = make_sticker_set_name(message.text or "", bot_user.username)
-    except ValueError as error:
+        pack_name = await available_pack_name(bot, message.text or "", bot_user.username)
+    except (ValueError, TelegramAPIError) as error:
         await message.answer(html.escape(str(error)))
+        return
+
+    requested_name = make_sticker_set_name(message.text or "", bot_user.username)
+    if pack_name != requested_name:
+        await message.answer(
+            f"Имя занято. Предлагаю <code>{html.escape(pack_name)}</code>. Примите кнопкой или введите другое.",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=pack_name)]], resize_keyboard=True),
+        )
         return
 
     data: Dict[str, Any] = await state.get_data()
     sources = [Path(source) for source in data["sticker_sources"]]
     sticker_format = data["sticker_format"]
-    await message.answer(f"Конвертирую {len(sources)} стикеров. Это может занять несколько минут…")
+    await message.answer(f"Конвертирую {len(sources)} стикеров. Это может занять несколько минут…", reply_markup=ReplyKeyboardRemove())
     try:
         result = await prepare_sticker_files(
             sources=sources,
             sticker_format=sticker_format,
-            output_root=settings.output_dir,
+            output_root=settings.output_dir / str(message.from_user.id),
             fps=settings.default_fps,
             duration=settings.default_duration,
             max_static_size_kb=settings.max_static_sticker_size_kb,
@@ -749,7 +792,7 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
 
         pack_url = await create_sticker_pack(
             bot=bot,
-            user_id=settings.allowed_user_id,
+            user_id=message.from_user.id,
             files=result.files,
             title=data["sticker_pack_title"],
             name=pack_name,
@@ -779,7 +822,7 @@ async def receive_document(message: Message, state: FSMContext, bot: Bot) -> Non
     document = message.document
     assert document is not None
     suffix = Path(document.file_name or "source.mov").suffix or ".mov"
-    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}{suffix}"
+    destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}_{secrets.token_hex(6)}{suffix}"
     try:
         source_kind = detect_source_kind(destination, document.mime_type)
     except ValueError as error:
@@ -803,7 +846,7 @@ async def receive_photo(message: Message, state: FSMContext, bot: Bot) -> None:
         await _reject(message)
         return
     photo = message.photo[-1]
-    destination = settings.temp_dir / f"{message.from_user.id}_{photo.file_unique_id}.jpg"
+    destination = settings.temp_dir / f"{message.from_user.id}_{photo.file_unique_id}_{secrets.token_hex(6)}.jpg"
     await bot.download(photo, destination=destination)
     await _set_source(message, state, destination, temporary=True, source_kind="image")
 
@@ -812,6 +855,9 @@ async def receive_photo(message: Message, state: FSMContext, bot: Bot) -> None:
 async def receive_path(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
+        return
+    if not settings.allow_local_paths or message.from_user.id != settings.allowed_user_id:
+        await message.answer("Отправьте исходник как файл через Telegram; локальные пути недоступны.")
         return
     source = parse_local_path(message.text or "")
     if not source.is_file():
@@ -830,23 +876,17 @@ async def receive_grid(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
         await _reject(message)
         return
-    match = re.fullmatch(r"\s*(\d{1,2})\s*[xх×]\s*(\d{1,2})\s*", message.text or "", re.I)
-    if not match:
-        await message.answer("Нужен формат <code>5x3</code>: столбцы × строки.")
+    selection = await confirmed_grid(message, state)
+    if selection is None:
         return
-    columns, rows = map(int, match.groups())
-    if not 1 <= columns <= 20 or not 1 <= rows <= 20:
-        await message.answer("Размер сетки должен быть от 1×1 до 20×20.")
-        return
-    if columns * rows > 200:
-        await message.answer("В одном custom emoji pack может быть не больше 200 элементов.")
-        return
+    columns, rows = selection
     await state.update_data(columns=columns, rows=rows)
     await state.set_state(RenderFlow.waiting_for_pack_title)
     await message.answer(
         "Как будет называться пак? Это отображаемое название, например "
         f"<code>My art</code>. Я автоматически добавлю "
-        f"<code>{html.escape(settings.pack_title_suffix)}</code>."
+        f"<code>{html.escape(settings.pack_title_suffix)}</code>.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
@@ -864,11 +904,7 @@ async def receive_pack_title(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(pack_title=title)
     await state.set_state(RenderFlow.waiting_for_pack_name)
-    await message.answer(
-        "Выберите имя ссылки — только английские буквы, цифры и подчёркивание.\n"
-        "Например <code>summer_art</code>. Обязательный суффикс с username бота "
-        "я добавлю автоматически."
-    )
+    await _suggest_name(message, state)
 
 
 @router.message(RenderFlow.waiting_for_pack_name, F.text)
@@ -881,15 +917,24 @@ async def receive_pack_name(message: Message, state: FSMContext, bot: Bot) -> No
         await message.answer("У бота должен быть username. Задайте его через @BotFather.")
         return
     try:
-        pack_name = make_sticker_set_name(message.text or "", bot_user.username)
-    except ValueError as error:
+        pack_name = await available_pack_name(bot, message.text or "", bot_user.username)
+    except (ValueError, TelegramAPIError) as error:
         await message.answer(html.escape(str(error)))
         return
+    requested_name = make_sticker_set_name(message.text or "", bot_user.username)
+    if pack_name != requested_name:
+        await message.answer(
+            f"Имя занято. Предлагаю <code>{html.escape(pack_name)}</code>. Примите кнопкой или введите другое.",
+            reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=pack_name)]], resize_keyboard=True),
+        )
+        return
+
     await state.update_data(pack_name=pack_name)
     await state.set_state(RenderFlow.waiting_for_emoji)
     await message.answer(
         "Теперь отправьте <b>один эмодзи</b>. Он будет назначен всем video emoji "
-        "в этом паке, например 🎨."
+        "в этом паке, например 🎨.",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 
@@ -900,7 +945,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
         return
     try:
         emoji = validate_pack_emoji(message.text or "")
-    except ValueError as error:
+    except (ValueError, TelegramAPIError) as error:
         await message.answer(html.escape(str(error)))
         return
 
@@ -915,14 +960,14 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
                 source=source,
                 columns=columns,
                 rows=rows,
-                output_root=settings.output_dir,
+                output_root=settings.output_dir / str(message.from_user.id),
             )
         else:
             result = await render_grid(
                 source=source,
                 columns=columns,
                 rows=rows,
-                output_root=settings.output_dir,
+                output_root=settings.output_dir / str(message.from_user.id),
                 fps=settings.default_fps,
                 duration=settings.default_duration,
                 max_size_kb=settings.max_emoji_size_kb,
@@ -948,7 +993,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
 
         pack_url = await create_custom_emoji_pack(
             bot=bot,
-            user_id=settings.allowed_user_id,
+            user_id=message.from_user.id,
             files=result.files,
             title=data["pack_title"],
             name=data["pack_name"],
@@ -958,7 +1003,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
         )
         preview_token = secrets.token_urlsafe(8)
         tg_art_previews[preview_token] = {
-            "user_id": settings.allowed_user_id,
+            "user_id": message.from_user.id,
             "pack_name": data["pack_name"],
             "columns": columns,
             "rows": rows,
@@ -1009,12 +1054,16 @@ async def fallback(message: Message) -> None:
 async def main() -> None:
     global settings
     settings = Settings.from_env()
+    admin.reset_flow = _reset_flow
+    admin.start_flow = start
+    access.store = access.AccessStore(settings.access_db, settings.allowed_user_id)
     configure_download_flow(settings)
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("FFmpeg и ffprobe не найдены в PATH")
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.set_my_commands(
         [
+            BotCommand(command="users", description="Управление пользователями"),
             BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
             BotCommand(command="sticker_pack", description="Создать стикерпак"),
             BotCommand(command="tg_art", description="Собрать TG Art из emoji pack"),
@@ -1024,6 +1073,10 @@ async def main() -> None:
         ]
     )
     dispatcher = Dispatcher(storage=MemoryStorage())
+    middleware = access.AccessMiddleware(settings.max_concurrent_jobs)
+    dispatcher.message.outer_middleware(middleware)
+    dispatcher.callback_query.outer_middleware(middleware)
+    dispatcher.include_router(admin_router)
     dispatcher.include_router(download_router)
     dispatcher.include_router(router)
     await dispatcher.start_polling(bot)
