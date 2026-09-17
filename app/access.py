@@ -64,10 +64,12 @@ class AccessMiddleware(BaseMiddleware):
             await event.answer('Используйте бота в личных сообщениях.')
             return
         lock = self.locks.setdefault(user.id, asyncio.Lock())
-        if lock.locked():
+        if lock.locked() and data.get("raw_state") != "AnalysisFlow:collecting":
             await event.answer('Предыдущий запрос ещё обрабатывается. Дождитесь завершения.')
             return
         async with lock:
+            if data.get("state") is not None:
+                data["raw_state"] = await data["state"].get_state()
             async with self.slots:
                 if not allowed(user.id):
                     await event.answer("Доступ отозван.")

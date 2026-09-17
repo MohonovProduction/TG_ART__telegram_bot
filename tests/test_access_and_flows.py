@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app import access, admin, bot as flows
+from app import access, admin, bot as flows, analysis_flow
 from app.access import AccessStore, AccessMiddleware
 from app.grid_keyboard import grid_keyboard, parse_grid, confirmed_grid, CONFIRM, CHANGE
 from app.pack_names import available_pack_name
@@ -112,11 +113,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         admin.reset_flow = flows._reset_flow
         admin.start_flow = flows.start
         dispatcher.include_router(admin.router)
+        analysis_flow.reset_flow = flows._reset_flow
+        analysis_flow.settings = SimpleNamespace(temp_dir=Path(self.directory.name))
+        dispatcher.include_router(analysis_flow.router)
         dispatcher.include_router(flows.download_router)
         dispatcher.include_router(flows.router)
         telegram = Bot('123456:FAKE_TOKEN_FOR_TESTS')
+        sequence = 0
         async def send(text, uid=3):
-            message = {'message_id': 1, 'date': 0, 'chat': {'id': uid, 'type': 'private'}, 'from': {'id': uid, 'is_bot': False, 'first_name': 'Test'}, 'text': text}
+            nonlocal sequence
+            sequence += 1
+            message = {'message_id': sequence, 'date': 0, 'chat': {'id': uid, 'type': 'private'}, 'from': {'id': uid, 'is_bot': False, 'first_name': 'Test'}, 'text': text}
             if text.startswith('/'):
                 message['entities'] = [{'type': 'bot_command', 'offset': 0, 'length': len(text)}]
             await dispatcher.feed_update(telegram, Update.model_validate({'update_id': 1, 'message': message}))
@@ -137,6 +144,17 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             await state.set_state('DownloadFlow:collecting')
             await send('/cancel')
             self.assertIsNone(await state.get_state())
+            await send('/analyze')
+            self.assertEqual(await state.get_state(), analysis_flow.AnalysisFlow.collecting.state)
+            async def delayed_request(*args, **kwargs):
+                await asyncio.sleep(0.01)
+            request.side_effect = delayed_request
+            await asyncio.gather(send('Первая часть'), send('Вторая часть'))
+            self.assertEqual(len((await state.get_data())['analysis_messages']), 2)
+            request.side_effect = None
+            await send('/done')
+            self.assertIsNone(await state.get_state())
+            self.assertEqual(request.call_args.args[1].document.filename, 'post-analysis.json')
             access.store.change(1, 3, None)
             await send('/start')
             self.assertIn('Доступ закрыт', request.call_args.args[1].text)

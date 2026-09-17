@@ -29,7 +29,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
-from app import access, admin
+from app import access, admin, analysis_flow
 from app.admin import router as admin_router
 from app.pack_names import available_pack_name
 from app.grid_keyboard import grid_keyboard, confirmed_grid
@@ -85,6 +85,7 @@ MODE_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
         [KeyboardButton(text="🧩 Собрать TG Art"), KeyboardButton(text="⭕ Кружок из видео")],
         [KeyboardButton(text="📥 Скачать стикеры / эмодзи")],
+        [KeyboardButton(text="🔍 Анализ поста")],
     ],
     resize_keyboard=True,
     one_time_keyboard=True,
@@ -317,6 +318,9 @@ async def receive_mode(message: Message, state: FSMContext) -> None:
         await _reject(message)
         return
     mode = (message.text or "").strip().lower()
+    if mode in {"🔍 анализ поста", "анализ поста"}:
+        await analysis_flow.start_analysis(message, state)
+        return
     if mode in {"🎨 tg art", "tg art", "art", "эмодзи", "emoji"}:
         await _start_emoji_pack(message, state)
         return
@@ -1056,6 +1060,8 @@ async def main() -> None:
     settings = Settings.from_env()
     admin.reset_flow = _reset_flow
     admin.start_flow = start
+    analysis_flow.reset_flow = _reset_flow
+    analysis_flow.settings = settings
     access.store = access.AccessStore(settings.access_db, settings.allowed_user_id)
     configure_download_flow(settings)
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -1063,6 +1069,7 @@ async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.set_my_commands(
         [
+            BotCommand(command="analyze", description="Анализ поста"),
             BotCommand(command="users", description="Управление пользователями"),
             BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
             BotCommand(command="sticker_pack", description="Создать стикерпак"),
@@ -1077,6 +1084,7 @@ async def main() -> None:
     dispatcher.message.outer_middleware(middleware)
     dispatcher.callback_query.outer_middleware(middleware)
     dispatcher.include_router(admin_router)
+    dispatcher.include_router(analysis_flow.router)
     dispatcher.include_router(download_router)
     dispatcher.include_router(router)
     await dispatcher.start_polling(bot)

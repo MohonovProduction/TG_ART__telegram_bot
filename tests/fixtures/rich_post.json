@@ -1,0 +1,284 @@
+{
+  "blocks": [
+    {
+      "type": "video",
+      "video": {
+        "duration": 5,
+        "width": 1920,
+        "height": 1440,
+        "file_name": "AD__v01.mp4",
+        "mime_type": "video/mp4",
+        "file_id": "test-rich-video",
+        "file_unique_id": "test-rich-video-unique",
+        "file_size": 3370219
+      }
+    },
+    {
+      "type": "paragraph",
+      "text": [
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285146008655800563",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5283021387118718838",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285276300783691737",
+          "alternative_text": "🧱"
+        },
+        " СМОТРИТЕ, КАК ",
+        {
+          "type": "underline",
+          "text": "ОЧЕРЕДНОЙ"
+        },
+        "\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5282759737711044412",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285382167432570877",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285430339785765613",
+          "alternative_text": "🧱"
+        },
+        " ",
+        {
+          "type": "underline",
+          "text": "РЭПЕР"
+        },
+        " ПЫТАЕТСЯ БЫТЬ\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5284982469186071663",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285254383565578601",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285269141073213144",
+          "alternative_text": "🧱"
+        },
+        " ",
+        {
+          "type": "italic",
+          "text": "НЕ ТАКИМ, КАК ВСЕ."
+        },
+        "\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285348284435574008",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285180669041879377",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5284996389175077839",
+          "alternative_text": "🧱"
+        },
+        "\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285221647324851734",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285204626369458008",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285313684179036085",
+          "alternative_text": "🧱"
+        },
+        " ВМЕСТО ОДНОГО\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285330911292859456",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285349963767788291",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285334600669767996",
+          "alternative_text": "🧱"
+        },
+        " НЕДО-",
+        {
+          "type": "underline",
+          "text": "АЛЬБОМА ОН"
+        },
+        "\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285455242006146141",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285271108168233622",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5283061871480450049",
+          "alternative_text": "🧱"
+        },
+        " ВЫПУСКАЕТ ",
+        {
+          "type": "underline",
+          "text": "ЦЕЛЫХ ДВА\n"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285455242006146141",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285271108168233622",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5283061871480450049",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "underline",
+          "text": " — "
+        },
+        "«ТРЕЗВЫЙ ТИП»\n",
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285003424331507752",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285245003357008789",
+          "alternative_text": "🧱"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5285070468770997178",
+          "alternative_text": "🧱"
+        },
+        " И «ПЬЯНОЕ ТЕЛО»."
+      ]
+    },
+    {
+      "type": "pullquote",
+      "text": {
+        "type": "italic",
+        "text": "БАС ЕСТЬ, ДРАМА ЕСТЬ, НЕРВ ЕСТЬ — ВСЁ КАК ЛЮДИ ЛЮБЯТ!"
+      },
+      "credit": {
+        "type": "bold",
+        "text": {
+          "type": "italic",
+          "text": "Известный музыкальный критик"
+        }
+      }
+    },
+    {
+      "type": "heading",
+      "text": "ТРЕЗВОСТЬ — БЕРИ, ПОКА ГОРЯЧЕЕ!",
+      "size": 2
+    },
+    {
+      "type": "paragraph",
+      "text": ""
+    },
+    {
+      "type": "paragraph",
+      "text": [
+        {
+          "type": "url",
+          "text": {
+            "type": "bold",
+            "text": "ПОДПИСЫВАЙТЕСЬ, ДАЛЬШЕ — БОЛЬШЕ. К СОЖАЛЕНИЮ."
+          },
+          "url": "https://t.me/checkdemmo"
+        },
+        {
+          "type": "bold",
+          "text": "\n\n"
+        },
+        "\n",
+        {
+          "type": "button",
+          "button": {
+            "text": "ТРЕЗВОСТЬ",
+            "style": "primary",
+            "url": "https://t.me/checkdemmo"
+          }
+        },
+        " "
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": [
+        "\n",
+        {
+          "type": "button",
+          "button": {
+            "text": "ТРЕЗВЫЙ ТИП",
+            "style": "danger",
+            "url": "https://band.link/phZBc"
+          }
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": [
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5463010113440717314",
+          "alternative_text": "👀"
+        },
+        {
+          "type": "custom_emoji",
+          "custom_emoji_id": "5463010113440717314",
+          "alternative_text": "👀"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "text": {
+        "type": "button",
+        "button": {
+          "text": "ПЬЯНОЕ ТЕЛО",
+          "style": "success",
+          "url": "https://band.link/phZBc"
+        }
+      }
+    }
+  ]
+}
