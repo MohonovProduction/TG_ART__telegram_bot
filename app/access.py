@@ -64,7 +64,7 @@ class AccessMiddleware(BaseMiddleware):
             await event.answer('Используйте бота в личных сообщениях.')
             return
         lock = self.locks.setdefault(user.id, asyncio.Lock())
-        if lock.locked() and data.get("raw_state") != "AnalysisFlow:collecting":
+        if lock.locked() and data.get("raw_state") not in ("AnalysisFlow:collecting", "InboxFlow:choosing", "InboxFlow:switching", "InboxFlow:sticker_kind", "RenderFlow:collecting_stickers"):
             await event.answer('Предыдущий запрос ещё обрабатывается. Дождитесь завершения.')
             return
         async with lock:

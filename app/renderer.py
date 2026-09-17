@@ -136,6 +136,30 @@ async def convert_webm_to_mov(
     return destination
 
 
+def video_note_filter(length: int, mode: str, position: str, background: str) -> tuple[str, bool]:
+    """Return a simple filter or a labelled complex graph for blurred Fit."""
+    if mode not in ('cover', 'fit', 'fill') or position not in ('center', 'top', 'bottom', 'left', 'right'):
+        raise RenderError('Некорректный режим масштабирования или положение кадра')
+    if background != 'blur':
+        import re
+        if not re.fullmatch(r'#[0-9a-fA-F]{6}', background):
+            raise RenderError('Цвет фона должен быть в формате #RRGGBB')
+    finish = 'fps=30,setsar=1,format=yuv420p'
+    if mode == 'cover':
+        x = '0' if position == 'left' else 'iw-min(iw\\,ih)' if position == 'right' else '(iw-min(iw\\,ih))/2'
+        y = '0' if position == 'top' else 'ih-min(iw\\,ih)' if position == 'bottom' else '(ih-min(iw\\,ih))/2'
+        return f"crop='min(iw\\,ih)':'min(iw\\,ih)':'{x}':'{y}',scale={length}:{length}:flags=lanczos,{finish}", False
+    if mode == 'fill':
+        return f'scale={length}:{length}:flags=lanczos,{finish}', False
+    fit = f'scale={length}:{length}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,setsar=1'
+    if background == 'blur':
+        graph = (f'[0:v:0]split=2[bg][fg];[bg]scale={length}:{length}:force_original_aspect_ratio=increase:flags=lanczos,'
+                 f"crop={length}:{length},setsar=1,boxblur=luma_radius='min(h,w)/20':luma_power=2[blur];"
+                 f'[fg]{fit}[front];[blur][front]overlay=(W-w)/2:(H-h)/2,{finish}[v]')
+        return graph, True
+    return f'{fit},pad={length}:{length}:(ow-iw)/2:(oh-ih)/2:color=0x{background[1:]},{finish}', False
+
+
 async def prepare_video_note(
     source: Path,
     output_root: Path,
@@ -144,6 +168,9 @@ async def prepare_video_note(
     max_size_mb: int = 47,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
+    mode: str = "cover",
+    position: str = "center",
+    background: str = "#000000",
 ) -> VideoNoteResult:
     """Convert a video to a square MPEG-4 file suitable for sendVideoNote."""
     if not source.is_file():
@@ -163,11 +190,7 @@ async def prepare_video_note(
     directory = Path(tempfile.mkdtemp(prefix="video_note_", dir=output_root))
     destination = directory / "video_note.mp4"
     max_bytes = max_size_mb * 1024 * 1024
-    video_filter = (
-        "crop='min(iw\\,ih)':'min(iw\\,ih)':"
-        "'(iw-min(iw\\,ih))/2':'(ih-min(iw\\,ih))/2',"
-        f"scale={length}:{length}:flags=lanczos,fps=30,setsar=1,format=yuv420p"
-    )
+    video_filter, complex_graph = video_note_filter(length, mode, position, background)
 
     try:
         for crf in (23, 27, 31, 35, 39):
@@ -175,8 +198,9 @@ async def prepare_video_note(
             await _run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
-                    "-t", str(duration), "-vf", video_filter,
+                    "-i", str(source),
+                    *( ["-filter_complex", video_filter, "-map", "[v]"] if complex_graph else ["-vf", video_filter, "-map", "0:v:0"] ),
+                    "-map", "0:a:0?", "-t", str(duration),
                     "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
                     "-profile:v", "main", "-level", "3.1",
                     "-c:a", "aac", "-b:a", "128k", "-ac", "2",

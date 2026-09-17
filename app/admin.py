@@ -47,6 +47,7 @@ async def action(message, state):
 
 
 @router.message(Command('cancel'))
+@router.message(F.text == '❌ Отмена')
 async def cancel(message, state):
     await reset_flow(state)
     await message.answer('Отменено. /start — функции бота.', reply_markup=ReplyKeyboardRemove())

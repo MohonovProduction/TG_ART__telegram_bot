@@ -7,6 +7,7 @@ import secrets
 import shutil
 from pathlib import Path
 from typing import Any, Dict
+from types import SimpleNamespace
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -29,7 +30,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
-from app import access, admin, analysis_flow
+from app import access, admin, analysis_flow, inbox_flow, video_note_flow
 from app.admin import router as admin_router
 from app.pack_names import available_pack_name
 from app.grid_keyboard import grid_keyboard, confirmed_grid
@@ -119,6 +120,8 @@ def _natural_path_key(path: Path) -> list[object]:
 
 
 async def _cleanup_temporary_sources(data: Dict[str, Any]) -> None:
+    if data.get("inbox_resume_data"):
+        await _cleanup_temporary_sources(data["inbox_resume_data"])
     if data.get("temporary") and data.get("source"):
         Path(data["source"]).unlink(missing_ok=True)
     for source in data.get("temporary_sticker_sources", []):
@@ -155,7 +158,7 @@ async def _start_video_note(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Отправьте видео или видео <b>как файл</b>. "
         + ("Также можно прислать полный локальный путь к видео. " if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else "")
-        + "\n\nВидео будет обрезано по центру до квадрата. "
+        + "\n\nЗатем выберите Cover, Fit или Fill и положение либо фон. "
         "Если оно длиннее 60 секунд, я возьму первые 60 секунд.",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -217,7 +220,7 @@ async def _start_sticker_collection(message: Message, state: FSMContext, sticker
         f"Отправляйте {source_kind} как файлы. Можно прислать несколько сообщений. "
         + ("Также можно указать путь к папке на компьютере с ботом. " if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else "")
         + "Когда закончите, отправьте /done.",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=inbox_flow.COLLECT_KEYBOARD,
     )
 
 
@@ -445,15 +448,16 @@ async def _render_and_send_video_note(
     state: FSMContext,
     source: Path,
     temporary: bool,
+    **options,
 ) -> None:
     await state.update_data(
         video_note_source=str(source),
         video_note_temporary=temporary,
     )
-    await message.answer("Готовлю кружок…")
+    await message.answer("Готовлю кружок…", reply_markup=ReplyKeyboardRemove())
     result = None
     try:
-        result = await prepare_video_note(source, settings.temp_dir)
+        result = await prepare_video_note(source, settings.temp_dir, **options)
         if result.truncated:
             await message.answer(
                 "Исходное видео длиннее 60 секунд — в кружок вошли первые 60 секунд."
@@ -503,7 +507,7 @@ async def receive_video_note_video(
             f"Ошибка: <code>{type(error).__name__}</code>"
         )
         return
-    await _render_and_send_video_note(message, state, destination, temporary=True)
+    await video_note_flow.start_options(message, state, destination, temporary=True)
 
 
 @router.message(RenderFlow.waiting_for_video_note_source, F.document)
@@ -535,7 +539,7 @@ async def receive_video_note_document(
             f"Ошибка: <code>{type(error).__name__}</code>"
         )
         return
-    await _render_and_send_video_note(message, state, destination, temporary=True)
+    await video_note_flow.start_options(message, state, destination, temporary=True)
 
 
 @router.message(RenderFlow.waiting_for_video_note_source, F.text)
@@ -558,7 +562,7 @@ async def receive_video_note_path(message: Message, state: FSMContext) -> None:
     if source_kind != "video":
         await message.answer("Для кружка нужен путь к видеофайлу.")
         return
-    await _render_and_send_video_note(message, state, source, temporary=False)
+    await video_note_flow.start_options(message, state, source, temporary=False)
 
 
 @router.message(RenderFlow.waiting_for_sticker_kind, F.text)
@@ -726,6 +730,7 @@ async def _suggest_name(message: Message, state: FSMContext) -> None:
         name = await available_pack_name(message.bot, base, me.username)
     except (TelegramAPIError, ValueError):
         name = make_sticker_set_name(base, me.username)
+    await state.update_data(suggested_name=name)
     await message.answer(
         f"Предлагаю имя ссылки: <code>{html.escape(name)}</code>. Примите кнопкой или введите своё.",
         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=name)]], resize_keyboard=True, one_time_keyboard=True),
@@ -1055,6 +1060,58 @@ async def fallback(message: Message) -> None:
     await message.answer("Используйте /start, чтобы начать новый рендер, или /cancel для отмены.")
 
 
+def _phase_hint(current):
+    hints = {
+        RenderFlow.waiting_for_grid.state: 'Ожидаю размер сетки.',
+        RenderFlow.waiting_for_pack_title.state: 'Ожидаю название пака.',
+        RenderFlow.waiting_for_sticker_pack_title.state: 'Ожидаю название стикерпака.',
+        RenderFlow.waiting_for_pack_name.state: 'Ожидаю имя ссылки.',
+        RenderFlow.waiting_for_sticker_pack_name.state: 'Ожидаю имя ссылки.',
+        RenderFlow.waiting_for_emoji.state: 'Ожидаю emoji для пака.',
+        RenderFlow.collecting_stickers.state: 'Ожидаю файлы для стикерпака.',
+        'InboxFlow:sticker_kind': 'Ожидаю тип стикерпака для смешанного альбома.',
+        'VideoNoteFlow:mode': 'Ожидаю способ масштабирования кружка.',
+        'VideoNoteFlow:position': 'Ожидаю положение кадра.',
+        'VideoNoteFlow:background': 'Ожидаю фон полей.',
+        'VideoNoteFlow:hex_color': 'Ожидаю HEX цвета фона.',
+        'AdminFlow:target': 'Ожидаю ID или контакт пользователя.',
+    }
+    return hints.get(current, 'Завершите текущий шаг или отправьте /cancel.')
+
+
+def _resume_keyboard(current, data, actor):
+    from app import download_flow
+    from app.grid_keyboard import grid_keyboard
+    if current == 'InboxFlow:choosing':
+        return inbox_flow.action_keyboard(inbox_flow.stored_messages(data), actor)
+    if current in (RenderFlow.waiting_for_grid.state, RenderFlow.waiting_for_existing_tg_art_grid.state):
+        return grid_keyboard(*(data.get('pending_grid') or (0, 0)))
+    if current in (RenderFlow.waiting_for_pack_name.state, RenderFlow.waiting_for_sticker_pack_name.state) and data.get('suggested_name'):
+        return video_note_flow.keyboard([[data['suggested_name']]])
+    return {
+        RenderFlow.waiting_for_mode.state: MODE_KEYBOARD,
+        RenderFlow.waiting_for_sticker_kind.state: STICKER_KIND_KEYBOARD,
+        RenderFlow.collecting_stickers.state: inbox_flow.COLLECT_KEYBOARD,
+        RenderFlow.waiting_for_sticker_emoji_mode.state: EMOJI_MODE_KEYBOARD,
+        'InboxFlow:sticker_kind': STICKER_KIND_KEYBOARD,
+        'VideoNoteFlow:mode': video_note_flow.MODE_KEYBOARD,
+        'VideoNoteFlow:position': video_note_flow.POSITION_KEYBOARD,
+        'VideoNoteFlow:background': video_note_flow.BACKGROUND_KEYBOARD,
+        'VideoNoteFlow:hex_color': video_note_flow.HEX_KEYBOARD,
+        'DownloadFlow:waiting_for_destination': download_flow.DESTINATION_KEYBOARD,
+        'DownloadFlow:collecting': download_flow.COLLECT_KEYBOARD,
+        'DownloadFlow:waiting_for_tgs_size': download_flow.SIZE_KEYBOARD,
+        'DownloadFlow:waiting_for_tgs_color': download_flow.COLOR_KEYBOARD,
+    }.get(current, ReplyKeyboardRemove())
+
+
+def configure_interactions(value):
+    video_note_flow.render = _render_and_send_video_note
+    inbox_flow.config = SimpleNamespace(settings=value, reset=_reset_flow, set_source=_set_source,
+        start_stickers=_start_sticker_collection, finish_stickers=_finish_sticker_collection,
+        phase_hint=_phase_hint, resume_keyboard=_resume_keyboard)
+
+
 async def main() -> None:
     global settings
     settings = Settings.from_env()
@@ -1064,6 +1121,7 @@ async def main() -> None:
     analysis_flow.settings = settings
     access.store = access.AccessStore(settings.access_db, settings.allowed_user_id)
     configure_download_flow(settings)
+    configure_interactions(settings)
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("FFmpeg и ffprobe не найдены в PATH")
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -1083,7 +1141,10 @@ async def main() -> None:
     middleware = access.AccessMiddleware(settings.max_concurrent_jobs)
     dispatcher.message.outer_middleware(middleware)
     dispatcher.callback_query.outer_middleware(middleware)
+    dispatcher.message.outer_middleware(inbox_flow.ContentFirstMiddleware())
+    dispatcher.include_router(inbox_flow.router)
     dispatcher.include_router(admin_router)
+    dispatcher.include_router(video_note_flow.router)
     dispatcher.include_router(analysis_flow.router)
     dispatcher.include_router(download_router)
     dispatcher.include_router(router)

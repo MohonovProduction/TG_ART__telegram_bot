@@ -13,7 +13,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app import access, admin, bot as flows, analysis_flow
+from app import access, admin, bot as flows, analysis_flow, inbox_flow, video_note_flow
+from app.config import Settings
 from app.access import AccessStore, AccessMiddleware
 from app.grid_keyboard import grid_keyboard, parse_grid, confirmed_grid, CONFIRM, CHANGE
 from app.pack_names import available_pack_name
@@ -112,7 +113,12 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         dispatcher.callback_query.outer_middleware(middleware)
         admin.reset_flow = flows._reset_flow
         admin.start_flow = flows.start
+        flows.settings = Settings("fake", 1, Path(self.directory.name), Path(self.directory.name), Path(self.directory.name))
+        flows.configure_interactions(flows.settings)
+        dispatcher.message.outer_middleware(inbox_flow.ContentFirstMiddleware())
+        dispatcher.include_router(inbox_flow.router)
         dispatcher.include_router(admin.router)
+        dispatcher.include_router(video_note_flow.router)
         analysis_flow.reset_flow = flows._reset_flow
         analysis_flow.settings = SimpleNamespace(temp_dir=Path(self.directory.name))
         dispatcher.include_router(analysis_flow.router)
@@ -120,11 +126,12 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         dispatcher.include_router(flows.router)
         telegram = Bot('123456:FAKE_TOKEN_FOR_TESTS')
         sequence = 0
-        async def send(text, uid=3):
+        async def send(text=None, uid=3, **content):
             nonlocal sequence
             sequence += 1
             message = {'message_id': sequence, 'date': 0, 'chat': {'id': uid, 'type': 'private'}, 'from': {'id': uid, 'is_bot': False, 'first_name': 'Test'}, 'text': text}
-            if text.startswith('/'):
+            message.update(content)
+            if text and text.startswith('/'):
                 message['entities'] = [{'type': 'bot_command', 'offset': 0, 'length': len(text)}]
             await dispatcher.feed_update(telegram, Update.model_validate({'update_id': 1, 'message': message}))
         with patch('aiogram.client.session.aiohttp.AiohttpSession.make_request', new_callable=AsyncMock) as request:
@@ -155,6 +162,44 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
             await send('/done')
             self.assertIsNone(await state.get_state())
             self.assertEqual(request.call_args.args[1].document.filename, 'post-analysis.json')
+            # Native reply actions and concurrent album parts use production routing.
+            request.side_effect = delayed_request
+            photos = [{'file_id': 'photo', 'file_unique_id': 'photo', 'width': 100, 'height': 100}]
+            await asyncio.gather(send(photo=photos, media_group_id='album'), send(photo=photos, media_group_id='album'))
+            self.assertEqual(await state.get_state(), inbox_flow.InboxFlow.choosing.state)
+            self.assertEqual(len((await state.get_data())['inbox_messages']), 2)
+            request.side_effect = None
+            await send('❌ Отмена')
+            self.assertIsNone(await state.get_state())
+            await send(uid=1, contact={'phone_number': '123', 'first_name': 'Person', 'user_id': 9})
+            await send(inbox_flow.ADMIN, uid=1)
+            self.assertEqual(access.store.role(9), 'admin')
+            await state.set_state(video_note_flow.VideoNoteFlow.mode)
+            await send('❌ Отмена')
+            self.assertIsNone(await state.get_state())
+            async def fake_download(file, destination, **kwargs):
+                Path(destination).write_bytes(b'fake-source')
+            with patch.object(Bot, 'download', new_callable=AsyncMock, side_effect=fake_download):
+                await send(photo=photos)
+                await send(inbox_flow.ART)
+                self.assertEqual(await state.get_state(), flows.RenderFlow.waiting_for_grid.state)
+                old_source = (await state.get_data())['source']
+                await send(video={'file_id': 'video', 'file_unique_id': 'video', 'width': 100, 'height': 100, 'duration': 1})
+                self.assertEqual(await state.get_state(), inbox_flow.InboxFlow.switching.state)
+                await send(inbox_flow.CONTINUE)
+                self.assertEqual((await state.get_data())['source'], old_source)
+                await send(video={'file_id': 'video', 'file_unique_id': 'video', 'width': 100, 'height': 100, 'duration': 1})
+                await send(inbox_flow.NEW)
+                self.assertFalse(Path(old_source).exists())
+                await send(inbox_flow.NOTE)
+                self.assertEqual(await state.get_state(), video_note_flow.VideoNoteFlow.mode.state)
+                await send('↔️ Fit — вписать')
+                await send(video_note_flow.HEX)
+                self.assertEqual(await state.get_state(), video_note_flow.VideoNoteFlow.hex_color.state)
+                await send('#NOTHEX')
+                self.assertEqual(await state.get_state(), video_note_flow.VideoNoteFlow.hex_color.state)
+                await send('❌ Отмена')
+                self.assertIsNone(await state.get_state())
             access.store.change(1, 3, None)
             await send('/start')
             self.assertIn('Доступ закрыт', request.call_args.args[1].text)
