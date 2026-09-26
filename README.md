@@ -175,6 +175,13 @@ Then press `Command + Space`, type `TG ART Bot`, and press Enter. The app opens 
 Terminal window with the bot. The launcher expects this project to remain at
 `/Users/mohonovproduction/Documents/TG_ART_bot`.
 
+If you change the launcher, sign and reinstall the local app bundle:
+
+```bash
+codesign --force --deep --sign - "TG ART Bot.app"
+ditto "TG ART Bot.app" "/Applications/TG ART Bot.app"
+```
+
 When the bot is managed as a macOS background service, its logs are stored in
 `~/Library/Logs/TG_ART_bot/`.
 

@@ -9,11 +9,8 @@ if [[ ! -x "$RUN_SCRIPT" ]]; then
   exit 1
 fi
 
-/usr/bin/osascript - "$RUN_SCRIPT" <<'APPLESCRIPT'
-on run argv
-    tell application "Terminal"
-        activate
-        do script quoted form of item 1 of argv
-    end tell
-end run
-APPLESCRIPT
+# Opening a .command file is handled by Launch Services and does not require the
+# Apple Events permission for controlling Terminal. macOS may revoke that
+# permission after a system update, which made the previous AppleScript-based
+# launcher appear to do nothing.
+/usr/bin/open -a Terminal "$RUN_SCRIPT"
