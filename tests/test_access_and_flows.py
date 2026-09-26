@@ -207,7 +207,7 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_created_pack_preview_offers_grid_and_checks_owner(self):
         preview = {'user_id': 3, 'pack_name': 'art_by_testbot', 'columns': 2, 'rows': 1}
-        flows.tg_art_previews['test-preview'] = preview
+        flows.tg_art_previews.put('test-preview', preview)
         callback = SimpleNamespace(from_user=SimpleNamespace(id=3), data='tg_art:test-preview', message=self.message, answer=AsyncMock())
         telegram = AsyncMock()
         telegram.get_sticker_set.return_value = SimpleNamespace(stickers=[SimpleNamespace(custom_emoji_id='1', emoji='🎨')])
@@ -219,7 +219,6 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         telegram.get_sticker_set.reset_mock()
         await flows.send_tg_art_preview(callback, telegram, self.state)
         telegram.get_sticker_set.assert_not_called()
-        flows.tg_art_previews.pop('test-preview')
 
     async def test_missing_set_and_taken_name(self):
         bot = AsyncMock()

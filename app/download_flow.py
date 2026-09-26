@@ -24,6 +24,7 @@ from app.sticker_downloader import (
     safe_asset_stem,
 )
 from app.tgs_renderer import normalize_hex_color, parse_render_size, render_tgs_to_mov
+from app.telegram_retry import retry_telegram
 
 
 class DownloadFlow(StatesGroup):
@@ -334,6 +335,8 @@ async def _save_batch(
     data = await state.get_data()
     assets = [StickerAsset.from_dict(item) for item in data["download_assets"]]
     destination_root = Path(data["download_root"])
+    actor_id = getattr(getattr(message, "from_user", None), "id", settings.allowed_user_id)
+    save_locally = settings.allow_local_paths and actor_id == settings.allowed_user_id
     job_dir = Path(tempfile.mkdtemp(prefix="sticker_download_", dir=settings.temp_dir))
     status = await message.answer(
         f"Сохраняю стикеры: готово <b>0/{len(assets)}</b>…",
@@ -355,7 +358,7 @@ async def _save_batch(
                 )
             source = source_dir / f"{stem}{asset.extension}"
             try:
-                await bot.download(asset.file_id, destination=source)
+                await retry_telegram(lambda: bot.download(asset.file_id, destination=source))
                 if asset.format == "static":
                     temporary_result = result_dir / f"{stem}.png"
                     final_name = f"{stem}.png"
@@ -377,9 +380,12 @@ async def _save_batch(
                         size=size,
                         color=applied_color,
                     )
-                deliverables.append(
-                    move_completed_file(temporary_result, destination_root, final_name)
-                )
+                if save_locally:
+                    deliverables.append(move_completed_file(temporary_result, destination_root, final_name))
+                else:
+                    # Cloud runs have no meaningful user-visible local folder. Keep the
+                    # result only for the current delivery and remove it in finally.
+                    deliverables.append(temporary_result)
             except Exception as error:
                 failures.append(f"{index}: {type(error).__name__}: {str(error)[:500]}")
 
@@ -406,11 +412,16 @@ async def _save_batch(
 
         png_count = sum(path.suffix.lower() == ".png" for path in deliverables)
         mov_count = sum(path.suffix.lower() == ".mov" for path in deliverables)
+        location = (
+            f"Папка: <code>{html.escape(str(destination_root))}</code>\n"
+            if save_locally
+            else "Файлы отправлены в чат и удалены с сервера.\n"
+        )
         summary = (
             f"Готово: <b>{len(deliverables)}/{len(assets)}</b>.\n"
             f"PNG: <b>{png_count}</b>, MOV: <b>{mov_count}</b>.\n"
-            f"Папка: <code>{html.escape(str(destination_root))}</code>\n"
-            f"Отправлено в чат: <b>{sent}</b>."
+            + location
+            + f"Отправлено в чат: <b>{sent}</b>."
         )
         if oversized:
             summary += f"\nБольше 50 MB, только локально: <b>{oversized}</b>."

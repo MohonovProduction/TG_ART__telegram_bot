@@ -7,6 +7,7 @@ from app import access
 
 reset_flow = None
 start_flow = None
+refresh_commands = None
 
 router = Router(name='administration')
 
@@ -18,18 +19,27 @@ class AdminFlow(StatesGroup):
 ACTIONS = {'➕ Добавить пользователя': 'user', '⭐ Назначить администратора': 'admin', '🚫 Отозвать доступ': None}
 
 
-@router.message(Command('users'))
-async def users(message, state):
+async def show_users(message, state):
     role = access.store.role(message.from_user.id)
     if role not in ('owner', 'admin'):
         await message.answer('У вас нет прав управления пользователями.')
         return
     entries = access.store.users()
-    text = 'Пользователи:\n' + '\n'.join(f'{uid}: {r}' for uid, r in entries)
+    def display(entry):
+        uid, role, username, first_name, last_name = entry
+        name = ' '.join(item for item in (first_name, last_name) if item) or 'Без имени'
+        handle = f' @{html.escape(username)}' if username else ''
+        return f'{html.escape(name)}{handle} · <code>{uid}</code> · {html.escape(role)}'
+    text = 'Пользователи:\n' + '\n'.join(display(entry) for entry in entries)
     for offset in range(0, len(text), 3500):
-        await message.answer(html.escape(text[offset:offset + 3500]))
+        await message.answer(text[offset:offset + 3500])
     buttons = [KeyboardButton(text=x) for x in ACTIONS if role == 'owner' or ACTIONS[x] != 'admin']
     await message.answer('Выберите действие.', reply_markup=ReplyKeyboardMarkup(keyboard=[[b] for b in buttons], resize_keyboard=True))
+
+
+@router.message(Command('users'))
+async def users(message, state):
+    await show_users(message, state)
 
 
 @router.message(F.text.in_(ACTIONS))
@@ -69,4 +79,6 @@ async def target(message, state):
         await message.answer(html.escape(str(error)) if isinstance(error, ValueError) and not str(error).startswith('invalid literal') else 'Нужен числовой Telegram ID. В контакте должен быть указан Telegram ID.')
         return
     await state.clear()
+    if refresh_commands:
+        await refresh_commands(message.bot, uid)
     await message.answer(f'Доступ для {uid} обновлён. /users — управление, /start — функции бота.')

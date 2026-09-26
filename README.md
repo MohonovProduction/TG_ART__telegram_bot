@@ -90,7 +90,11 @@ The following environment variables are available:
 | `MAX_EMOJI_SIZE_KB` | `256` | Maximum size of each rendered video emoji |
 | `MAX_STATIC_STICKER_SIZE_KB` | `512` | Maximum size of each converted static sticker |
 | `MAX_VIDEO_STICKER_SIZE_KB` | `256` | Maximum size of each converted video sticker |
+| `MAX_JOB_INPUT_MB` | `500` | Maximum total size of source files in one job |
+| `JOB_RESULT_TTL_SECONDS` | `3600` | Retention for orphaned renderer results after a restart |
 | `PACK_TITLE_SUFFIX` | `by @mohonovproduction` | Text automatically appended to pack titles |
+| `LOG_CHANNEL_ID` | empty | Private channel ID for non-owner activity logs; add the bot there as an administrator |
+| `RECIPE_TTL_SECONDS` | `3600` | Lifetime of the “Create a new version” and delete buttons after pack creation |
 
 ## Running the bot
 
@@ -142,15 +146,17 @@ FFmpeg устанавливается в образ автоматически. 
 
 Все текущие функции включены. Локальные пути внутри контейнера относятся к его
 файловой системе, а не к Mac: отправляйте исходники через Telegram. Экспорт
-сохраняется в `/data/downloads` и отправляется в чат в пределах существующего
-лимита отправки. Через стандартный Bot API нельзя скачать входящий файл больше
-20 MB. Папки Mac автоматически не подключаются.
+отправляется в чат и удаляется с сервера после завершения операции. Большие ZIP
+результаты автоматически разделяются на независимые части до 49 MB. Через
+стандартный Bot API нельзя скачать входящий файл больше 20 MB. Папки Mac
+автоматически не подключаются.
 
 Владелец задаётся через `ALLOWED_USER_ID`. Пользователи и роли сохраняются
 в `/data/access.sqlite3`; локальный бот использует отдельную базу `./data/access.sqlite3`.
 После перезапуска незавершённые диалоги и
 кнопки предпросмотра сбрасываются: используйте `/start`; созданные паки и файлы
-в volume сохраняются.
+в volume сохраняются. Временные результаты рендера очищаются после отправки;
+осиротевшие каталоги после сбоя хранятся не дольше часа.
 
 Для будущей машины Linux amd64 можно собрать отдельный образ:
 
@@ -204,7 +210,7 @@ When the bot is managed as a macOS background service, its logs are stored in
 ## Usage
 
 1. Send `/start` and choose **TG Art**, **Стикер пак**, or **Кружок из видео**.
-2. For **TG Art**, upload an image or an alpha-channel video as a document (or provide a local file path), enter the grid size, pack title, link name, and one emoji.
+2. For **TG Art**, upload an image or any supported video as a document (or provide a local file path), enter the grid size, pack title, link name, and one emoji. Alpha is preserved when present; a regular video produces opaque tiles.
 3. For **Стикер пак**, choose **Статичные** or **Видео**.
 4. Send every source file as a document, or provide an absolute path to a folder on the computer running the bot. Send `/done` when the list is complete.
 5. Choose one common emoji or assign an emoji to every sticker in sequence, then enter the title and link name.
@@ -236,6 +242,8 @@ https://t.me/addstickers/example_by_bot
 ```
 
 Use `/cancel` at any point to stop the current operation.
+
+After a pack is created, its result message contains short-lived buttons to create a corrected version with the same TG Art settings or delete the pack. Deletion requires confirmation. The owner may delete packs created for any user; other users may delete only their own packs.
 
 The Telegram command menu also provides `/emoji_pack`, `/sticker_pack`,
 `/video_note`, `/download`, and `/cancel`.

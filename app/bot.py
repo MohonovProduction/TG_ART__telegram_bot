@@ -26,6 +26,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    BotCommandScopeChat,
 )
 from aiogram.exceptions import TelegramAPIError
 
@@ -40,6 +41,10 @@ from app.download_flow import router as download_router
 from app.download_flow import start_download
 from app.media import append_title_suffix, detect_source_kind
 from app.path_utils import parse_local_path
+from app.archive_delivery import send_zip_parts
+from app.jobs import HeavyJobQueue, JobAlreadyRunning, JobCancelled, PreviewCache, cleanup_expired_job_directories
+from app.recipes import Recipe, RecipeCache
+from app.activity_log import ActivityLogger, AuditMiddleware
 from app.renderer import (
     RenderError,
     prepare_sticker_files,
@@ -79,18 +84,51 @@ class RenderFlow(StatesGroup):
 
 router = Router()
 settings: Settings
-tg_art_previews: Dict[str, Dict[str, Any]] = {}
+tg_art_previews = PreviewCache()
+heavy_jobs: HeavyJobQueue
+recipes: RecipeCache
+activity_logger: ActivityLogger
+
+BASE_MODE_ROWS = [
+    [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
+    [KeyboardButton(text="🧩 Собрать TG Art"), KeyboardButton(text="⭕ Кружок из видео")],
+    [KeyboardButton(text="📥 Скачать стикеры / эмодзи")],
+    [KeyboardButton(text="🔍 Анализ поста")],
+]
 
 MODE_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
-        [KeyboardButton(text="🧩 Собрать TG Art"), KeyboardButton(text="⭕ Кружок из видео")],
-        [KeyboardButton(text="📥 Скачать стикеры / эмодзи")],
-        [KeyboardButton(text="🔍 Анализ поста")],
+        *BASE_MODE_ROWS,
     ],
     resize_keyboard=True,
     one_time_keyboard=True,
 )
+
+
+def mode_keyboard_for(user_id: int) -> ReplyKeyboardMarkup:
+    rows = [*BASE_MODE_ROWS]
+    if access.store and access.store.role(user_id) in ("owner", "admin"):
+        rows.append([KeyboardButton(text="👥 Пользователи")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, one_time_keyboard=True)
+
+
+def commands_for(user_id: int) -> list[BotCommand]:
+    commands = [
+        BotCommand(command="analyze", description="Анализ поста"),
+        BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
+        BotCommand(command="sticker_pack", description="Создать стикерпак"),
+        BotCommand(command="tg_art", description="Собрать TG Art из emoji pack"),
+        BotCommand(command="video_note", description="Сделать кружок из видео"),
+        BotCommand(command="download", description="Скачать стикеры и эмодзи"),
+        BotCommand(command="cancel", description="Отменить текущую операцию"),
+    ]
+    if access.store and access.store.role(user_id) in ("owner", "admin"):
+        commands.insert(1, BotCommand(command="users", description="Управление пользователями"))
+    return commands
+
+
+async def refresh_commands(bot: Bot, user_id: int) -> None:
+    await bot.set_my_commands(commands_for(user_id), scope=BotCommandScopeChat(chat_id=user_id))
 STICKER_KIND_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="Статичные"), KeyboardButton(text="Видео")]],
     resize_keyboard=True,
@@ -107,6 +145,52 @@ def _allowed(message: Message) -> bool:
     return bool(message.from_user and access.allowed(message.from_user.id))
 
 
+async def _card(message: Message, state: FSMContext, text: str, reply_markup=None) -> Message:
+    """Keep prompts and progress in one editable operation card when possible."""
+    # Reply keyboards cannot be attached/changed with editMessageText. The main menu
+    # remains available, while the operation card itself is always editable.
+    if reply_markup is not None and not isinstance(reply_markup, InlineKeyboardMarkup):
+        reply_markup = None
+    data = await state.get_data()
+    message_id = data.get("operation_message_id")
+    if message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id, message_id=message_id, text=text, reply_markup=reply_markup
+            )
+            return message
+        except TelegramAPIError:
+            pass
+    card = await message.answer(text, reply_markup=reply_markup)
+    await state.update_data(operation_message_id=card.message_id)
+    return card
+
+
+async def _set_card_markup(message: Message, state: FSMContext, text: str, reply_markup=None) -> Message:
+    return await _card(message, state, text, reply_markup)
+
+
+async def _chat_action(message: Message, action: str):
+    """Return a task that refreshes Telegram's five-second activity indicator."""
+    async def pulse() -> None:
+        while True:
+            try:
+                await message.bot.send_chat_action(message.chat.id, action=action)
+            except TelegramAPIError:
+                return
+            await asyncio.sleep(4)
+    task = asyncio.create_task(pulse())
+    return task
+
+
+async def _stop_chat_action(task) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def _reject(message: Message) -> None:
     await message.answer("Доступ закрыт. Обратитесь к владельцу бота.")
 
@@ -117,6 +201,27 @@ def _sticker_limit(sticker_format: str) -> int:
 
 def _natural_path_key(path: Path) -> list[object]:
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def _source_bytes(sources: list[str]) -> int:
+    total = 0
+    for source in sources:
+        try:
+            total += Path(source).stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _fits_job_limit(current_bytes: int, incoming_bytes: int) -> bool:
+    return current_bytes + incoming_bytes <= settings.max_job_input_mb * 1024 * 1024
+
+
+async def _reject_oversized_job(message: Message) -> None:
+    await message.answer(
+        f"Лимит исходников для одной задачи — {settings.max_job_input_mb} MB. "
+        "Завершите текущую пачку или отправьте меньший набор."
+    )
 
 
 async def _cleanup_temporary_sources(data: Dict[str, Any]) -> None:
@@ -135,15 +240,24 @@ async def _reset_flow(state: FSMContext) -> None:
     await state.clear()
 
 
+async def _run_heavy_job(message: Message, work):
+    async def queued(position: int) -> None:
+        await message.answer(f"Задача в очереди, позиция: <b>{position}</b>. Начну, когда освободится место.")
+
+    return await heavy_jobs.run(message.from_user.id, queued, work)
+
+
 async def _start_emoji_pack(message: Message, state: FSMContext) -> None:
     await _reset_flow(state)
     await state.set_state(RenderFlow.waiting_for_source)
-    await message.answer(
-        "Отправьте изображение или lossless-видео с alpha <b>как файл</b>. "
+    await _card(message, state,
+        "Отправьте изображение или видео <b>как файл</b>. Прозрачность сохраняется, "
+        "но обычное видео без alpha тоже поддерживается. "
         + ("Также можно прислать полный локальный путь.\n\n"
         "Например: <code>/Users/me/Desktop/art.png</code>" if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else ""),
         reply_markup=ReplyKeyboardRemove(),
     )
+    await activity_logger.event(message.bot, message.from_user, "TG Art", "начат сценарий")
 
 
 async def _start_sticker_pack(message: Message, state: FSMContext) -> None:
@@ -200,12 +314,25 @@ async def _set_source(
     message: Message, state: FSMContext, source: Path, temporary: bool, source_kind: str
 ) -> None:
     await state.update_data(source=str(source), temporary=temporary, source_kind=source_kind)
+    data = await state.get_data()
+    recipe = data.get("recipe")
+    if recipe:
+        if recipe.kind != "tg_art" or recipe.columns is None or recipe.rows is None:
+            raise ValueError("Этот рецепт нельзя использовать для TG Art")
+        await state.update_data(
+            columns=recipe.columns, rows=recipe.rows, pack_title=recipe.title,
+        )
+        await state.set_state(RenderFlow.waiting_for_pack_name)
+        await _suggest_name(message, state, base=recipe.title)
+        return
     await state.set_state(RenderFlow.waiting_for_grid)
-    await message.answer(
+    await _card(message, state,
         "Исходник принят. Отправьте размер сетки в формате <code>5x3</code> "
-        "(столбцы × строки), либо выберите правый нижний угол кнопкой.",
-        reply_markup=grid_keyboard()
+        "(столбцы × строки), либо выберите правый нижний угол кнопкой."
     )
+    # Grid selection is a Telegram reply keyboard; unlike inline buttons, it cannot
+    # be embedded into an editable message.
+    await message.answer("Выбор сетки:", reply_markup=grid_keyboard())
 
 
 async def _start_sticker_collection(message: Message, state: FSMContext, sticker_format: str) -> None:
@@ -230,6 +357,13 @@ async def _finish_sticker_collection(message: Message, state: FSMContext) -> Non
     if not sources:
         await message.answer("Сначала добавьте хотя бы один файл.")
         return
+    data = await state.get_data()
+    recipe = data.get("recipe")
+    if recipe and recipe.kind == "sticker" and len(recipe.emojis) == len(sources):
+        await state.update_data(sticker_emojis=list(recipe.emojis), sticker_pack_title=recipe.title)
+        await state.set_state(RenderFlow.waiting_for_sticker_pack_name)
+        await _suggest_name(message, state, base=recipe.title)
+        return
     await state.set_state(RenderFlow.waiting_for_sticker_emoji_mode)
     await message.answer(
         f"Принято файлов: <b>{len(sources)}</b>. Как назначить эмодзи?",
@@ -239,7 +373,7 @@ async def _finish_sticker_collection(message: Message, state: FSMContext) -> Non
 
 async def _ask_sticker_pack_title(message: Message, state: FSMContext) -> None:
     await state.set_state(RenderFlow.waiting_for_sticker_pack_title)
-    await message.answer(
+    await _card(message, state,
         "Как будет называться sticker pack? Например <code>My stickers</code>. "
         f"Я автоматически добавлю <code>{html.escape(settings.pack_title_suffix)}</code>.",
         reply_markup=ReplyKeyboardRemove(),
@@ -268,9 +402,10 @@ async def start(message: Message, state: FSMContext) -> None:
         return
     await _reset_flow(state)
     await state.set_state(RenderFlow.waiting_for_mode)
+    await refresh_commands(message.bot, message.from_user.id)
     await message.answer(
         "Что хотите создать?",
-        reply_markup=MODE_KEYBOARD,
+        reply_markup=mode_keyboard_for(message.from_user.id),
     )
 
 
@@ -323,6 +458,12 @@ async def receive_mode(message: Message, state: FSMContext) -> None:
     mode = (message.text or "").strip().lower()
     if mode in {"🔍 анализ поста", "анализ поста"}:
         await analysis_flow.start_analysis(message, state)
+        return
+    if mode in {"👥 пользователи", "пользователи"}:
+        if access.store.role(message.from_user.id) in ("owner", "admin"):
+            await admin.show_users(message, state)
+        else:
+            await _reject(message)
         return
     if mode in {"🎨 tg art", "tg art", "art", "эмодзи", "emoji"}:
         await _start_emoji_pack(message, state)
@@ -441,6 +582,79 @@ async def send_tg_art_preview(callback: CallbackQuery, bot: Bot, state: FSMConte
         )
         return
     await callback.answer()
+    tg_art_previews.discard(token)
+
+
+def _recipe_accessible(recipe: Recipe, user_id: int, *, deleting: bool = False) -> bool:
+    if user_id == recipe.owner_id:
+        return True
+    return deleting and access.store.role(user_id) == "owner"
+
+
+@router.callback_query(F.data.startswith("recipe:new:"))
+async def create_recipe_version(callback: CallbackQuery, state: FSMContext) -> None:
+    token = (callback.data or "").removeprefix("recipe:new:")
+    recipe = recipes.get(token)
+    if not callback.from_user or not recipe or not _recipe_accessible(recipe, callback.from_user.id):
+        await callback.answer("Рецепт недоступен или уже истёк.", show_alert=True)
+        return
+    await _reset_flow(state)
+    await state.update_data(recipe=recipe, recipe_version=True)
+    if recipe.kind == "sticker" and recipe.sticker_format:
+        await _start_sticker_collection(callback.message, state, recipe.sticker_format)
+        if callback.message:
+            await callback.message.edit_text(
+                "Отправьте исправленные исходники и нажмите /done. Если число файлов не изменится, emoji и название будут взяты из предыдущего пака."
+            )
+        await callback.answer()
+        return
+    await state.set_state(RenderFlow.waiting_for_source)
+    if callback.message:
+        await callback.message.edit_text(
+            "Отправьте исправленный исходник для новой версии. Настройки сетки и emoji будут взяты из предыдущего пака."
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("recipe:delete:"))
+async def confirm_recipe_delete(callback: CallbackQuery) -> None:
+    token = (callback.data or "").removeprefix("recipe:delete:")
+    recipe = recipes.get(token)
+    if not callback.from_user or not recipe or not _recipe_accessible(recipe, callback.from_user.id, deleting=True):
+        await callback.answer("Удаление недоступно или кнопка уже истекла.", show_alert=True)
+        return
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Да, удалить пак", callback_data=f"recipe:confirm:{token}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"recipe:cancel:{token}")],
+        ]))
+    await callback.answer("Подтвердите удаление пака.")
+
+
+@router.callback_query(F.data.startswith("recipe:cancel:"))
+async def cancel_recipe_delete(callback: CallbackQuery) -> None:
+    await callback.answer("Удаление отменено.")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+
+
+@router.callback_query(F.data.startswith("recipe:confirm:"))
+async def delete_recipe_pack(callback: CallbackQuery, bot: Bot) -> None:
+    token = (callback.data or "").removeprefix("recipe:confirm:")
+    recipe = recipes.get(token)
+    if not callback.from_user or not recipe or not _recipe_accessible(recipe, callback.from_user.id, deleting=True):
+        await callback.answer("Удаление недоступно или кнопка уже истекла.", show_alert=True)
+        return
+    try:
+        await bot.delete_sticker_set(recipe.pack_name)
+    except TelegramAPIError as error:
+        await callback.answer("Telegram не смог удалить пак.", show_alert=True)
+        return
+    recipes.discard(token)
+    await activity_logger.event(bot, callback.from_user, "Пак", "удалён", recipe.pack_url)
+    if callback.message:
+        await callback.message.edit_text(f"Пак удалён: <code>{html.escape(recipe.pack_name)}</code>")
+    await callback.answer("Пак удалён.")
 
 
 async def _render_and_send_video_note(
@@ -457,7 +671,9 @@ async def _render_and_send_video_note(
     await message.answer("Готовлю кружок…", reply_markup=ReplyKeyboardRemove())
     result = None
     try:
-        result = await prepare_video_note(source, settings.temp_dir, **options)
+        result = await _run_heavy_job(
+            message, lambda: prepare_video_note(source, settings.temp_dir, **options)
+        )
         if result.truncated:
             await message.answer(
                 "Исходное видео длиннее 60 секунд — в кружок вошли первые 60 секунд."
@@ -467,7 +683,7 @@ async def _render_and_send_video_note(
             duration=max(1, round(result.duration)),
             length=640,
         )
-    except RenderError as error:
+    except (RenderError, JobAlreadyRunning, JobCancelled) as error:
         await message.answer(
             f"Не удалось подготовить кружок:\n<code>{html.escape(str(error)[:3500])}</code>"
         )
@@ -602,6 +818,9 @@ async def receive_sticker_document(message: Message, state: FSMContext, bot: Bot
     if len(sources) >= limit:
         await message.answer(f"В этом наборе может быть не больше {limit} стикеров.")
         return
+    if not _fits_job_limit(_source_bytes(sources), document.file_size or 0):
+        await _reject_oversized_job(message)
+        return
 
     suffix = Path(document.file_name or "sticker").suffix
     destination = settings.temp_dir / f"{message.from_user.id}_{document.file_unique_id}_{secrets.token_hex(6)}{suffix}"
@@ -658,6 +877,9 @@ async def receive_sticker_folder(message: Message, state: FSMContext) -> None:
         return
     if len(accepted) > remaining:
         await message.answer(f"В папке {len(accepted)} файлов, но можно добавить только {remaining}.")
+        return
+    if not _fits_job_limit(_source_bytes(sources), sum(path.stat().st_size for path in accepted)):
+        await _reject_oversized_job(message)
         return
     sources.extend(str(path) for path in accepted)
     await state.update_data(sticker_sources=sources)
@@ -719,8 +941,8 @@ async def receive_individual_sticker_emoji(message: Message, state: FSMContext) 
     await message.answer(f"Отправьте эмодзи для стикера {len(emojis) + 1} из {total}.")
 
 
-async def _suggest_name(message: Message, state: FSMContext) -> None:
-    base = suggest_pack_name(message.text or "")
+async def _suggest_name(message: Message, state: FSMContext, base: str | None = None) -> None:
+    base = suggest_pack_name(base if base is not None else message.text or "")
     # Apply the existing Telegram name constraints before displaying the suggestion.
     me = await message.bot.get_me()
     if not me.username:
@@ -731,7 +953,7 @@ async def _suggest_name(message: Message, state: FSMContext) -> None:
     except (TelegramAPIError, ValueError):
         name = make_sticker_set_name(base, me.username)
     await state.update_data(suggested_name=name)
-    await message.answer(
+    await _card(message, state,
         f"Предлагаю имя ссылки: <code>{html.escape(name)}</code>. Примите кнопкой или введите своё.",
         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=name)]], resize_keyboard=True, one_time_keyboard=True),
     )
@@ -780,24 +1002,27 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
     sticker_format = data["sticker_format"]
     await message.answer(f"Конвертирую {len(sources)} стикеров. Это может занять несколько минут…", reply_markup=ReplyKeyboardRemove())
     try:
-        result = await prepare_sticker_files(
-            sources=sources,
-            sticker_format=sticker_format,
-            output_root=settings.output_dir / str(message.from_user.id),
-            fps=settings.default_fps,
-            duration=settings.default_duration,
+        result = await _run_heavy_job(message, lambda: prepare_sticker_files(
+            sources=sources, sticker_format=sticker_format, output_root=settings.temp_dir,
+            fps=settings.default_fps, duration=settings.default_duration,
             max_static_size_kb=settings.max_static_sticker_size_kb,
             max_video_size_kb=settings.max_video_sticker_size_kb,
-        )
-        await message.answer_document(
-            FSInputFile(result.archive),
-            caption=f"Готово: {len(result.files)} файлов {sticker_format}. Локальная папка: <code>{result.directory}</code>",
+        ))
+        await send_zip_parts(
+            message, result.files, f"stickers_{sticker_format}", settings.temp_dir,
+            f"Готово: {len(result.files)} файлов {sticker_format}."
         )
         status = await message.answer(f"Создаю sticker pack: загружено 0/{len(result.files)}…")
 
         async def report_progress(completed: int, total: int) -> None:
             if completed == total or completed == 1 or completed % 5 == 0:
                 await status.edit_text(f"Создаю sticker pack: загружено {completed}/{total}…")
+
+        async def report_retry(attempt: int, seconds: float) -> None:
+            await status.edit_text(
+                f"Telegram временно ограничил запросы. Повторяю через {seconds:g} с "
+                f"(попытка {attempt}/4)…"
+            )
 
         pack_url = await create_sticker_pack(
             bot=bot,
@@ -808,17 +1033,36 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
             emojis=data["sticker_emojis"],
             sticker_format=sticker_format,
             progress=report_progress,
+            retry_notice=report_retry,
         )
+        recipe_token = secrets.token_urlsafe(8)
+        recipes.put(Recipe(
+            token=recipe_token, owner_id=message.from_user.id, pack_name=pack_name,
+            pack_url=pack_url, kind="sticker", title=data["sticker_pack_title"],
+            emoji=data["sticker_emojis"][0] if data["sticker_emojis"] else "🎨",
+            sticker_format=sticker_format, emojis=tuple(data["sticker_emojis"]),
+        ))
         await status.edit_text(
-            f"Sticker pack создан: <a href=\"{pack_url}\">{html.escape(data['sticker_pack_title'])}</a>"
+            f"Sticker pack создан: <a href=\"{pack_url}\">{html.escape(data['sticker_pack_title'])}</a>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить пак", url=pack_url)],
+                [InlineKeyboardButton(text="🔁 Создать новую версию", callback_data=f"recipe:new:{recipe_token}")],
+                [InlineKeyboardButton(text="🗑 Удалить пак", callback_data=f"recipe:delete:{recipe_token}")],
+            ]),
         )
-    except RenderError as error:
+        await activity_logger.event(bot, message.from_user, "Sticker pack", "пак создан", pack_url)
+    except (RenderError, JobAlreadyRunning, JobCancelled) as error:
+        await activity_logger.event(bot, message.from_user, "Sticker pack", "ошибка конвертации")
         await message.answer(f"Конвертация не выполнена:\n<code>{html.escape(str(error)[:3500])}</code>")
     except TelegramAPIError as error:
+        await activity_logger.event(bot, message.from_user, "Sticker pack", "ошибка Telegram")
         await message.answer(f"Telegram не смог создать пак:\n<code>{html.escape(str(error)[:3000])}</code>")
     except Exception as error:
+        await activity_logger.event(bot, message.from_user, "Sticker pack", "непредвиденная ошибка")
         await message.answer(f"Не удалось завершить создание пака:\n<code>{html.escape(str(error)[:3000])}</code>")
     finally:
+        if 'result' in locals() and result is not None:
+            shutil.rmtree(result.directory, ignore_errors=True)
         await _cleanup_temporary_sources(data)
         await state.clear()
 
@@ -891,7 +1135,7 @@ async def receive_grid(message: Message, state: FSMContext) -> None:
     columns, rows = selection
     await state.update_data(columns=columns, rows=rows)
     await state.set_state(RenderFlow.waiting_for_pack_title)
-    await message.answer(
+    await _card(message, state,
         "Как будет называться пак? Это отображаемое название, например "
         f"<code>My art</code>. Я автоматически добавлю "
         f"<code>{html.escape(settings.pack_title_suffix)}</code>.",
@@ -909,7 +1153,7 @@ async def receive_pack_title(message: Message, state: FSMContext) -> None:
             append_title_suffix(message.text or "", settings.pack_title_suffix)
         )
     except ValueError as error:
-        await message.answer(html.escape(str(error)))
+        await _card(message, state, html.escape(str(error)))
         return
     await state.update_data(pack_title=title)
     await state.set_state(RenderFlow.waiting_for_pack_name)
@@ -923,16 +1167,16 @@ async def receive_pack_name(message: Message, state: FSMContext, bot: Bot) -> No
         return
     bot_user = await bot.get_me()
     if not bot_user.username:
-        await message.answer("У бота должен быть username. Задайте его через @BotFather.")
+        await _card(message, state, "У бота должен быть username. Задайте его через @BotFather.")
         return
     try:
         pack_name = await available_pack_name(bot, message.text or "", bot_user.username)
     except (ValueError, TelegramAPIError) as error:
-        await message.answer(html.escape(str(error)))
+        await _card(message, state, html.escape(str(error)))
         return
     requested_name = make_sticker_set_name(message.text or "", bot_user.username)
     if pack_name != requested_name:
-        await message.answer(
+        await _card(message, state,
             f"Имя занято. Предлагаю <code>{html.escape(pack_name)}</code>. Примите кнопкой или введите другое.",
             reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=pack_name)]], resize_keyboard=True),
         )
@@ -940,7 +1184,7 @@ async def receive_pack_name(message: Message, state: FSMContext, bot: Bot) -> No
 
     await state.update_data(pack_name=pack_name)
     await state.set_state(RenderFlow.waiting_for_emoji)
-    await message.answer(
+    await _card(message, state,
         "Теперь отправьте <b>один эмодзи</b>. Он будет назначен всем video emoji "
         "в этом паке, например 🎨.",
         reply_markup=ReplyKeyboardRemove()
@@ -962,43 +1206,44 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
     source = Path(data["source"])
     source_kind = data["source_kind"]
     columns, rows = int(data["columns"]), int(data["rows"])
-    await message.answer(f"Рендерю сетку {columns}×{rows}. Это может занять несколько минут…")
+    await _card(message, state, f"Рендерю сетку {columns}×{rows}. Это может занять несколько минут…")
+    action_task = await _chat_action(message, "choose_sticker")
     try:
         if source_kind == "image":
-            result = await render_image_grid(
-                source=source,
-                columns=columns,
-                rows=rows,
-                output_root=settings.output_dir / str(message.from_user.id),
-            )
+            result = await _run_heavy_job(message, lambda: render_image_grid(
+                source=source, columns=columns, rows=rows, output_root=settings.temp_dir,
+            ))
         else:
-            result = await render_grid(
-                source=source,
-                columns=columns,
-                rows=rows,
-                output_root=settings.output_dir / str(message.from_user.id),
-                fps=settings.default_fps,
-                duration=settings.default_duration,
+            result = await _run_heavy_job(message, lambda: render_grid(
+                source=source, columns=columns, rows=rows, output_root=settings.temp_dir,
+                fps=settings.default_fps, duration=settings.default_duration,
                 max_size_kb=settings.max_emoji_size_kb,
-            )
-        await message.answer_document(
-            FSInputFile(result.archive),
-            caption=(
+            ))
+        await send_zip_parts(
+            message, result.files, f"tg_art_{columns}x{rows}", settings.temp_dir,
+            (
                 f"Готово: {len(result.files)} файлов "
                 f"{'PNG' if source_kind == 'image' else 'WebM'}.\n"
                 f"Исходник: {result.source_info.width}×{result.source_info.height}, "
-                f"{result.source_info.pixel_format}.\n"
-                f"Локальная папка: <code>{result.directory}</code>"
+                f"{result.source_info.pixel_format}."
             ),
         )
-        status = await message.answer(f"Создаю emoji pack: загружено 0/{len(result.files)}…")
+        await _stop_chat_action(action_task)
+        action_task = await _chat_action(message, "upload_document")
+        await _card(message, state, f"Создаю emoji pack: загружено 0/{len(result.files)}…")
         last_reported = 0
 
         async def report_progress(completed: int, total: int) -> None:
             nonlocal last_reported
             if completed == total or completed - last_reported >= 5:
                 last_reported = completed
-                await status.edit_text(f"Создаю emoji pack: загружено {completed}/{total}…")
+                await _card(message, state, f"Создаю emoji pack: загружено {completed}/{total}…")
+
+        async def report_retry(attempt: int, seconds: float) -> None:
+            await _card(message, state,
+                f"Telegram временно ограничил запросы. Повторяю через {seconds:g} с "
+                f"(попытка {attempt}/4)…"
+            )
 
         pack_url = await create_custom_emoji_pack(
             bot=bot,
@@ -1009,44 +1254,58 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
             emoji=emoji,
             sticker_format="static" if source_kind == "image" else "video",
             progress=report_progress,
+            retry_notice=report_retry,
         )
         preview_token = secrets.token_urlsafe(8)
-        tg_art_previews[preview_token] = {
+        tg_art_previews.put(preview_token, {
             "user_id": message.from_user.id,
             "pack_name": data["pack_name"],
             "columns": columns,
             "rows": rows,
             "fallback_emoji": emoji,
-        }
-        await status.edit_text(
+        })
+        recipe_token = secrets.token_urlsafe(8)
+        recipes.put(Recipe(
+            token=recipe_token, owner_id=message.from_user.id, pack_name=data["pack_name"],
+            pack_url=pack_url, kind="tg_art", title=data["pack_title"], emoji=emoji,
+            columns=columns, rows=rows,
+        ))
+        buttons = [
+            [InlineKeyboardButton(text="➕ Добавить пак", url=pack_url)],
+            [InlineKeyboardButton(text="🔁 Создать новую версию", callback_data=f"recipe:new:{recipe_token}")],
+            [InlineKeyboardButton(text="🗑 Удалить пак", callback_data=f"recipe:delete:{recipe_token}")],
+            [InlineKeyboardButton(text="🎨 Показать TG Art", callback_data=f"tg_art:{preview_token}")],
+        ]
+        await _card(message, state,
             f"Emoji pack создан: <a href=\"{pack_url}\">{html.escape(data['pack_title'])}</a>\n\n"
             "Добавьте пак в Telegram, затем нажмите «Показать TG Art».",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="➕ Добавить пак", url=pack_url)],
-                    [
-                        InlineKeyboardButton(
-                            text="🎨 Показать TG Art",
-                            callback_data=f"tg_art:{preview_token}",
-                        )
-                    ],
-                ]
-            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
-    except RenderError as error:
+        sticker_set = await bot.get_sticker_set(data["pack_name"])
+        tg_art, entities = build_tg_art_grid(
+            [item.custom_emoji_id for item in sticker_set.stickers if item.custom_emoji_id], columns, rows, emoji
+        )
+        await activity_logger.tg_art(bot, message.from_user, pack_url, tg_art, entities)
+    except (RenderError, JobAlreadyRunning, JobCancelled) as error:
+        await activity_logger.event(bot, message.from_user, "TG Art", "ошибка рендера")
         await message.answer(f"Рендер не выполнен:\n<code>{html.escape(str(error)[:3500])}</code>")
     except TelegramAPIError as error:
+        await activity_logger.event(bot, message.from_user, "TG Art", "ошибка Telegram")
         await message.answer(
             "Telegram не смог создать пак. Если набор уже появился, часть emoji могла "
             "успеть загрузиться.\n\n"
             f"Ошибка: <code>{html.escape(str(error)[:3000])}</code>"
         )
     except Exception as error:
+        await activity_logger.event(bot, message.from_user, "TG Art", "непредвиденная ошибка")
         await message.answer(
             "Не удалось завершить создание пака.\n\n"
             f"Ошибка: <code>{html.escape(str(error)[:3000])}</code>"
         )
     finally:
+        await _stop_chat_action(action_task)
+        if 'result' in locals() and result is not None:
+            shutil.rmtree(result.directory, ignore_errors=True)
         if data.get("temporary"):
             source.unlink(missing_ok=True)
         await state.clear()
@@ -1113,10 +1372,16 @@ def configure_interactions(value):
 
 
 async def main() -> None:
-    global settings
+    global settings, heavy_jobs, recipes, activity_logger
     settings = Settings.from_env()
+    heavy_jobs = HeavyJobQueue(settings.max_concurrent_jobs)
+    recipes = RecipeCache(settings.recipe_ttl_seconds)
+    activity_logger = ActivityLogger(settings.log_channel_id, settings.allowed_user_id)
+    access.cancel_job = heavy_jobs.cancel
+    cleanup_expired_job_directories(settings.temp_dir, settings.job_result_ttl_seconds)
     admin.reset_flow = _reset_flow
     admin.start_flow = start
+    admin.refresh_commands = refresh_commands
     analysis_flow.reset_flow = _reset_flow
     analysis_flow.settings = settings
     access.store = access.AccessStore(settings.access_db, settings.allowed_user_id)
@@ -1125,22 +1390,13 @@ async def main() -> None:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("FFmpeg и ffprobe не найдены в PATH")
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    await bot.set_my_commands(
-        [
-            BotCommand(command="analyze", description="Анализ поста"),
-            BotCommand(command="users", description="Управление пользователями"),
-            BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
-            BotCommand(command="sticker_pack", description="Создать стикерпак"),
-            BotCommand(command="tg_art", description="Собрать TG Art из emoji pack"),
-            BotCommand(command="video_note", description="Сделать кружок из видео"),
-            BotCommand(command="download", description="Скачать стикеры и эмодзи"),
-            BotCommand(command="cancel", description="Отменить текущую операцию"),
-        ]
-    )
+    await bot.set_my_commands(commands_for(settings.allowed_user_id))
     dispatcher = Dispatcher(storage=MemoryStorage())
     middleware = access.AccessMiddleware(settings.max_concurrent_jobs)
     dispatcher.message.outer_middleware(middleware)
     dispatcher.callback_query.outer_middleware(middleware)
+    dispatcher.message.outer_middleware(AuditMiddleware(activity_logger))
+    dispatcher.callback_query.outer_middleware(AuditMiddleware(activity_logger))
     dispatcher.message.outer_middleware(inbox_flow.ContentFirstMiddleware())
     dispatcher.include_router(inbox_flow.router)
     dispatcher.include_router(admin_router)

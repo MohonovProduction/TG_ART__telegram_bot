@@ -61,7 +61,17 @@ async def _run(command: Iterable[str]) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await process.communicate()
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+        raise
     if process.returncode:
         message = stderr.decode("utf-8", errors="replace").strip()
         raise RenderError(message[-3000:] or "FFmpeg завершился с ошибкой")
@@ -433,12 +443,6 @@ async def render_grid(
     info = await probe_video(source, ffprobe)
     if info.width < columns or info.height < rows:
         raise RenderError("Сетка содержит больше ячеек, чем пикселей в исходнике")
-    if not info.has_alpha:
-        raise RenderError(
-            f"Alpha-канал не найден (pix_fmt={info.pixel_format}). "
-            "Экспортируйте исходник как ProRes 4444, FFV1 с alpha или PNG sequence."
-        )
-
     output_root.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix=f"{source.stem}_", dir=output_root))
     files: List[Path] = []

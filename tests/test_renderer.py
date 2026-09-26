@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,16 @@ class RendererTests(unittest.TestCase):
     def test_parse_fps(self):
         self.assertGreater(_parse_fps("30000/1001"), 29.9)
         self.assertEqual(_parse_fps("0/0"), 0)
+
+    def test_cancelled_subprocess_is_terminated(self):
+        async def cancel_process():
+            task = asyncio.create_task(_run([sys.executable, "-c", "import time; time.sleep(30)"]))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel_process())
 
     def test_alpha_detection(self):
         self.assertTrue(VideoInfo(100, 100, 3, 30, "yuva444p10le", "prores").has_alpha)

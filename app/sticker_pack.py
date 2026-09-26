@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence, Union
 
 from aiogram.types import MessageEntity
+from app.telegram_retry import retry_telegram
+from app.telegram_retry import RetryNotice
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -113,16 +115,15 @@ def validate_pack_emoji(value: str) -> str:
 
 
 async def _upload_sticker(
-    bot: "Bot", user_id: int, path: Path, emoji: str, sticker_format: str
+    bot: "Bot", user_id: int, path: Path, emoji: str, sticker_format: str,
+    retry_notice: RetryNotice | None = None,
 ) -> "InputSticker":
     from aiogram.types import FSInputFile, InputSticker
 
-    uploaded = await bot.upload_sticker_file(
-        user_id=user_id,
-        sticker=FSInputFile(path),
-        sticker_format=sticker_format,
+    uploaded = await retry_telegram(lambda: bot.upload_sticker_file(
+        user_id=user_id, sticker=FSInputFile(path), sticker_format=sticker_format,
         request_timeout=120,
-    )
+    ), notice=retry_notice)
     if not uploaded.file_id:
         raise RuntimeError(f"Telegram не вернул file_id для {path.name}")
     return InputSticker(sticker=uploaded.file_id, format=sticker_format, emoji_list=[emoji])
@@ -137,6 +138,7 @@ async def create_custom_emoji_pack(
     emoji: str,
     sticker_format: str = "video",
     progress: Optional[ProgressCallback] = None,
+    retry_notice: RetryNotice | None = None,
 ) -> str:
     return await create_sticker_pack(
         bot=bot,
@@ -148,6 +150,7 @@ async def create_custom_emoji_pack(
         sticker_format=sticker_format,
         sticker_type="custom_emoji",
         progress=progress,
+        retry_notice=retry_notice,
     )
 
 
@@ -161,6 +164,7 @@ async def create_sticker_pack(
     sticker_format: str,
     sticker_type: str = "regular",
     progress: Optional[ProgressCallback] = None,
+    retry_notice: RetryNotice | None = None,
 ) -> str:
     if not files:
         raise ValueError("Нет файлов для создания пака")
@@ -177,7 +181,7 @@ async def create_sticker_pack(
 
     total = len(files)
 
-    first = await _upload_sticker(bot, user_id, files[0], emojis[0], sticker_format)
+    first = await _upload_sticker(bot, user_id, files[0], emojis[0], sticker_format, retry_notice)
     await bot.create_new_sticker_set(
         user_id=user_id,
         name=name,
@@ -190,13 +194,10 @@ async def create_sticker_pack(
         await progress(1, total)
 
     for index, path in enumerate(files[1:], start=2):
-        sticker = await _upload_sticker(bot, user_id, path, emojis[index - 1], sticker_format)
-        await bot.add_sticker_to_set(
-            user_id=user_id,
-            name=name,
-            sticker=sticker,
-            request_timeout=120,
-        )
+        sticker = await _upload_sticker(bot, user_id, path, emojis[index - 1], sticker_format, retry_notice)
+        await retry_telegram(lambda: bot.add_sticker_to_set(
+            user_id=user_id, name=name, sticker=sticker, request_timeout=120,
+        ), notice=retry_notice)
         if progress:
             await progress(index, total)
 

@@ -25,7 +25,11 @@ class Settings:
     max_emoji_size_kb: int = 256
     max_static_sticker_size_kb: int = 512
     max_video_sticker_size_kb: int = 256
+    max_job_input_mb: int = 500
+    job_result_ttl_seconds: int = 3600
     pack_title_suffix: str = "by @mohonovproduction"
+    log_channel_id: int | None = None
+    recipe_ttl_seconds: int = 3600
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -41,10 +45,19 @@ class Settings:
             path = Path(os.getenv(variable, default)).expanduser()
             return path if path.is_absolute() else PROJECT_ROOT / path
 
+        def positive_int(variable: str, default: str, minimum: int = 1) -> int:
+            try:
+                value = int(os.getenv(variable, default))
+            except ValueError as error:
+                raise RuntimeError(f"{variable} должен быть целым числом") from error
+            if value < minimum:
+                raise RuntimeError(f"{variable} должен быть не меньше {minimum}")
+            return value
+
         settings = cls(
             access_db=project_path("ACCESS_DB", "./data/access.sqlite3").resolve(),
             allow_local_paths=os.getenv("ALLOW_LOCAL_PATHS", "true").lower() == "true",
-            max_concurrent_jobs=max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2"))),
+            max_concurrent_jobs=positive_int("MAX_CONCURRENT_JOBS", "2"),
             bot_token=token,
             allowed_user_id=int(user_id),
             output_dir=project_path("OUTPUT_DIR", "./output").resolve(),
@@ -52,14 +65,14 @@ class Settings:
             download_dir=project_path("DOWNLOAD_DIR", "./downloads").resolve(),
             default_fps=min(30, max(1, int(os.getenv("DEFAULT_FPS", "30")))),
             default_duration=min(3.0, max(0.1, float(os.getenv("DEFAULT_DURATION", "3")))),
-            max_emoji_size_kb=int(os.getenv("MAX_EMOJI_SIZE_KB", "256")),
-            max_static_sticker_size_kb=int(
-                os.getenv("MAX_STATIC_STICKER_SIZE_KB", "512")
-            ),
-            max_video_sticker_size_kb=int(
-                os.getenv("MAX_VIDEO_STICKER_SIZE_KB", "256")
-            ),
+            max_emoji_size_kb=positive_int("MAX_EMOJI_SIZE_KB", "256"),
+            max_static_sticker_size_kb=positive_int("MAX_STATIC_STICKER_SIZE_KB", "512"),
+            max_video_sticker_size_kb=positive_int("MAX_VIDEO_STICKER_SIZE_KB", "256"),
+            max_job_input_mb=positive_int("MAX_JOB_INPUT_MB", "500"),
+            job_result_ttl_seconds=positive_int("JOB_RESULT_TTL_SECONDS", "3600"),
             pack_title_suffix=os.getenv("PACK_TITLE_SUFFIX", "by @mohonovproduction").strip(),
+            log_channel_id=(int(os.getenv("LOG_CHANNEL_ID", "0").strip() or "0") or None),
+            recipe_ttl_seconds=positive_int("RECIPE_TTL_SECONDS", "3600"),
         )
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         settings.temp_dir.mkdir(parents=True, exist_ok=True)

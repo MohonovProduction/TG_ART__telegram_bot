@@ -13,6 +13,7 @@ from app.media import detect_source_kind
 from app.rich_message import rich_payload, walk_tree
 from app.renderer import probe_video, RenderError
 from app.post_analysis import send_analysis
+from app.telegram_retry import retry_telegram
 
 router = Router(name='content_first')
 config = None
@@ -43,7 +44,7 @@ def media_sources(message):
     sources = []
     if message.photo:
         photo = max(message.photo, key=lambda item: item.width * item.height)
-        sources.append({'kind': 'image', 'file_id': photo.file_id, 'suffix': '.jpg'})
+        sources.append({'kind': 'image', 'file_id': photo.file_id, 'suffix': '.jpg', 'file_size': photo.file_size or 0})
     for attr in ('video', 'animation', 'video_note', 'document'):
         attachment = getattr(message, attr, None)
         if attachment:
@@ -53,7 +54,7 @@ def media_sources(message):
                 kind = 'video' if attr != 'document' else detect_source_kind(Path(filename), attachment.mime_type)
             except ValueError:
                 continue
-            sources.append({'kind': kind, 'file_id': attachment.file_id, 'suffix': suffix or ('.mp4' if kind == 'video' else '.png')})
+            sources.append({'kind': kind, 'file_id': attachment.file_id, 'suffix': suffix or ('.mp4' if kind == 'video' else '.png'), 'file_size': getattr(attachment, 'file_size', None) or 0})
     rich = rich_payload(message)
     if rich:
         for _, block in walk_tree(rich):
@@ -189,7 +190,7 @@ async def download_source(source, message, bot):
         suffix = '.mp4' if source['kind'] == 'video' else '.png'
     destination = config.settings.temp_dir / f'{message.from_user.id}_{secrets.token_hex(12)}{suffix}'
     try:
-        await bot.download(source['file_id'], destination=destination)
+        await retry_telegram(lambda: bot.download(source['file_id'], destination=destination))
     except BaseException:
         destination.unlink(missing_ok=True)
         raise
@@ -207,6 +208,14 @@ async def append_stickers(message, state, bot, sources=None):
     limit = 120 if expected == 'image' else 50
     if len(paths) + len(sources) > limit:
         await message.answer(f'В паке может быть не больше {limit} стикеров.', reply_markup=COLLECT_KEYBOARD)
+        return
+    existing_size = sum(Path(path).stat().st_size for path in paths if Path(path).is_file())
+    incoming_size = sum(int(source.get('file_size') or 0) for source in sources)
+    if existing_size + incoming_size > config.settings.max_job_input_mb * 1024 * 1024:
+        await message.answer(
+            f'Лимит исходников для одной задачи — {config.settings.max_job_input_mb} MB. '
+            'Завершите текущую пачку или отправьте меньший набор.', reply_markup=COLLECT_KEYBOARD
+        )
         return
     temporary = list(data.get('temporary_sticker_sources', []))
     # Persist each file immediately so cancel can clean up a partial batch.

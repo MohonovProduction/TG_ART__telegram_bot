@@ -98,7 +98,7 @@ async def render_tgs_to_mov(
         await process.stdin.wait_closed()
         stderr = await process.stderr.read() if process.stderr else b""
         return_code = await process.wait()
-    except Exception:
+    except BaseException:
         if process.returncode is None:
             process.kill()
         await process.wait()
