@@ -6,6 +6,7 @@ from typing import Optional
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".avif"}
 VIDEO_EXTENSIONS = {".mov", ".mkv", ".webm", ".mp4", ".m4v", ".avi"}
+ANIMATED_EXTENSIONS = {".tgs"}
 
 
 def detect_source_kind(path: Path, mime_type: Optional[str] = None) -> str:
@@ -14,11 +15,13 @@ def detect_source_kind(path: Path, mime_type: Optional[str] = None) -> str:
         return "image"
     if mime.startswith("video/"):
         return "video"
+    if path.suffix.lower() in ANIMATED_EXTENSIONS:
+        return "animated"
     if path.suffix.lower() in IMAGE_EXTENSIONS:
         return "image"
     if path.suffix.lower() in VIDEO_EXTENSIONS:
         return "video"
-    raise ValueError("Поддерживаются изображения PNG/JPEG/WebP/TIFF и видео MOV/MKV/WebM/MP4")
+    raise ValueError("Поддерживаются изображения, видео и TGS-анимации")
 
 
 def append_title_suffix(title: str, suffix: str) -> str:
@@ -31,4 +34,3 @@ def append_title_suffix(title: str, suffix: str) -> str:
             f"Название вместе с «{normalized_suffix}» должно быть не длиннее 64 символов"
         )
     return result
-

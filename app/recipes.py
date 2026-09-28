@@ -17,6 +17,7 @@ class Recipe:
     columns: int | None = None
     rows: int | None = None
     sticker_format: str | None = None
+    sticker_type: str = "regular"
     emojis: tuple[str, ...] = ()
 
 

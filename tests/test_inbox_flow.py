@@ -149,12 +149,11 @@ class InboxTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.state.get_state(), note.VideoNoteFlow.mode.state)
         self.telegram.download.assert_awaited_once()
 
-    async def test_non_alpha_art_keeps_choice_and_removes_download(self):
+    async def test_non_alpha_art_starts_grid_rendering(self):
         await self.receive(video())
-        with patch('app.inbox_flow.probe_video', new_callable=AsyncMock, return_value=SimpleNamespace(has_alpha=False)):
-            await inbox.choose_action(incoming(text=inbox.ART), self.state, self.telegram)
-        self.assertEqual(await self.state.get_state(), inbox.InboxFlow.choosing.state)
-        self.assertFalse(list(self.root.glob('*.mp4')))
+        await inbox.choose_action(incoming(text=inbox.ART), self.state, self.telegram)
+        self.assertEqual(await self.state.get_state(), 'RenderFlow:waiting_for_grid')
+        self.assertTrue(list(self.root.glob('*.mp4')))
 
     async def test_forwarded_text_analysis_uses_original_message(self):
         original = incoming(text='Post', forward_origin={'type': 'hidden_user', 'date': 0, 'sender_user_name': 'Sender'})

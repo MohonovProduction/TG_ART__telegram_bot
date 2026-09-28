@@ -237,6 +237,25 @@ def report_text(analysis):
     return '\n'.join(lines)
 
 
+def visible_whitespace(text: str) -> str:
+    """HTML preview that exposes spacing without changing the copied post."""
+    rendered = []
+    for line in text.split('\n'):
+        if line == '':
+            rendered.append('<code>↵</code>')
+            continue
+        parts = []
+        for character in line:
+            if character == ' ':
+                parts.append('<code>·</code>')
+            elif character == '\u00a0':
+                parts.append('<code>⍽</code>')
+            else:
+                parts.append(html.escape(character))
+        rendered.append(''.join(parts))
+    return '\n'.join(rendered)
+
+
 async def send_replaced_text(bot, chat_id, text, entities=None, link_preview_options=None):
     """Split large outputs at Unicode boundaries and rebase formatting."""
     entities = entities or []
@@ -355,6 +374,18 @@ async def send_analysis(messages, bot, chat_id, temp_dir):
     if len(report) > 3800:
         report = f"<b>Анализ поста</b>\nСообщений: {len(messages)}\nCustom emoji: {analysis['custom_emoji_count']}\nПодробные характеристики и список наборов — в JSON."
     await bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
+    for index, item in enumerate(analysis['messages'], start=1):
+        source = item['original_text']
+        if not source:
+            continue
+        preview = visible_whitespace(source)
+        if len(preview) > 3500:
+            preview = preview[:3500] + '\n…'
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f'<b>Текст {index}: служебные символы</b>\n{preview}',
+            parse_mode='HTML',
+        )
     await copy_post(messages, analysis, bot, chat_id)
     payload = json.dumps(analysis, ensure_ascii=False, indent=2).encode('utf-8')
     await bot.send_document(chat_id=chat_id, document=BufferedInputFile(payload, filename='post-analysis.json'))

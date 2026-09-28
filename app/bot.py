@@ -72,6 +72,7 @@ class RenderFlow(StatesGroup):
     waiting_for_pack_name = State()
     waiting_for_emoji = State()
     waiting_for_sticker_kind = State()
+    waiting_for_tgs_pack_type = State()
     collecting_stickers = State()
     waiting_for_sticker_emoji_mode = State()
     waiting_for_common_sticker_emoji = State()
@@ -93,6 +94,7 @@ activity_logger: ActivityLogger
 
 BASE_MODE_ROWS = [
     [KeyboardButton(text="🎨 TG Art"), KeyboardButton(text="🖼 Стикер пак")],
+    [KeyboardButton(text="✨ TGS-пак")],
     [KeyboardButton(text="🧩 Собрать TG Art"), KeyboardButton(text="⭕ Кружок из видео")],
     [KeyboardButton(text="📥 Скачать стикеры / эмодзи")],
     [KeyboardButton(text="🔍 Анализ поста")],
@@ -116,9 +118,11 @@ def mode_keyboard_for(user_id: int) -> ReplyKeyboardMarkup:
 
 def commands_for(user_id: int) -> list[BotCommand]:
     commands = [
+        BotCommand(command="start", description="Главное меню"),
         BotCommand(command="analyze", description="Анализ поста"),
         BotCommand(command="emoji_pack", description="Создать эмодзи-пак"),
         BotCommand(command="sticker_pack", description="Создать стикерпак"),
+        BotCommand(command="tgs_pack", description="Создать TGS-пак"),
         BotCommand(command="tg_art", description="Собрать TG Art из emoji pack"),
         BotCommand(command="video_note", description="Сделать кружок из видео"),
         BotCommand(command="download", description="Скачать стикеры и эмодзи"),
@@ -141,6 +145,11 @@ EMOJI_MODE_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
     one_time_keyboard=True,
 )
+TGS_PACK_TYPE_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Стикер пак"), KeyboardButton(text="Emoji pack")]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
 
 
 def _allowed(message: Message) -> bool:
@@ -148,22 +157,8 @@ def _allowed(message: Message) -> bool:
 
 
 async def _card(message: Message, state: FSMContext, text: str, reply_markup=None) -> Message:
-    """Keep exactly one current operation card, always visible at chat bottom.
-
-    Telegram leaves an edited message at its original position and can't edit reply
-    keyboards. Replacing the previous bot-owned card keeps the chat clean *and*
-    makes the next question discoverable.
-    """
-    data = await state.get_data()
-    message_id = data.get("operation_message_id")
-    if message_id:
-        try:
-            await message.bot.delete_message(chat_id=message.chat.id, message_id=message_id)
-        except TelegramAPIError:
-            pass
-    card = await message.answer(text, reply_markup=reply_markup)
-    await state.update_data(operation_message_id=card.message_id)
-    return card
+    """Send a visible step; only long-running progress edits its own message."""
+    return await message.answer(text, reply_markup=reply_markup)
 
 
 async def _set_card_markup(message: Message, state: FSMContext, text: str, reply_markup=None) -> Message:
@@ -196,7 +191,17 @@ async def _reject(message: Message) -> None:
 
 
 def _sticker_limit(sticker_format: str) -> int:
-    return 120 if sticker_format == "static" else 50
+    return 50 if sticker_format == "video" else 120
+
+
+def _title_suffix(message: Message) -> str:
+    username = getattr(message.from_user, "username", None) if message.from_user else None
+    username = username or ""
+    return f"by @{username}" if username else ""
+
+
+def _pack_title(value: str, message: Message) -> str:
+    return validate_pack_title(append_title_suffix(value, _title_suffix(message)))
 
 
 def _natural_path_key(path: Path) -> list[object]:
@@ -274,14 +279,39 @@ async def _start_sticker_pack(message: Message, state: FSMContext) -> None:
     await message.answer("Выберите тип стикеров.", reply_markup=STICKER_KIND_KEYBOARD)
 
 
+async def _start_tgs_pack(message: Message, state: FSMContext) -> None:
+    await _reset_flow(state)
+    await state.set_state(RenderFlow.waiting_for_tgs_pack_type)
+    await message.answer(
+        "Какой TGS-набор создать?\n\n"
+        "• <b>Стикер пак</b> — анимированные стикеры.\n"
+        "• <b>Emoji pack</b> — анимированные custom emoji.",
+        reply_markup=TGS_PACK_TYPE_KEYBOARD,
+    )
+
+
+@router.message(RenderFlow.waiting_for_tgs_pack_type, F.text)
+async def receive_tgs_pack_type(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip().lower()
+    if value not in {"стикер пак", "emoji pack"}:
+        await message.answer("Выберите тип TGS-набора кнопкой.", reply_markup=TGS_PACK_TYPE_KEYBOARD)
+        return
+    await state.update_data(sticker_type="custom_emoji" if value == "emoji pack" else "regular")
+    await _start_sticker_collection(message, state, "animated")
+    data = await state.get_data()
+    pending = data.get("pending_tgs_sources")
+    if pending:
+        await state.update_data(pending_tgs_sources=[])
+        await inbox_flow.append_stickers(message, state, message.bot, sources=pending)
+
+
 async def _start_video_note(message: Message, state: FSMContext) -> None:
     await _reset_flow(state)
     await state.set_state(RenderFlow.waiting_for_video_note_source)
     await message.answer(
         "Отправьте видео или видео <b>как файл</b>. "
         + ("Также можно прислать полный локальный путь к видео. " if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else "")
-        + "\n\nЗатем выберите Cover, Fit или Fill и положение либо фон. "
-        "Если оно длиннее 60 секунд, я возьму первые 60 секунд.",
+        + "Если оно длиннее 60 секунд, я возьму первые 60 секунд.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -348,7 +378,7 @@ async def _start_sticker_collection(message: Message, state: FSMContext, sticker
         temporary_sticker_sources=[],
     )
     await state.set_state(RenderFlow.collecting_stickers)
-    source_kind = "изображения" if sticker_format == "static" else "видео"
+    source_kind = {"static": "изображения", "video": "видео", "animated": "TGS-анимации"}[sticker_format]
     await message.answer(
         f"Отправляйте {source_kind} как файлы. Можно прислать несколько сообщений. "
         + ("Также можно указать путь к папке на компьютере с ботом. " if settings.allow_local_paths and message.from_user.id == settings.allowed_user_id else "")
@@ -381,7 +411,7 @@ async def _ask_sticker_pack_title(message: Message, state: FSMContext) -> None:
     await state.set_state(RenderFlow.waiting_for_sticker_pack_title)
     await _card(message, state,
         "Как будет называться sticker pack? Например <code>My stickers</code>. "
-        f"Я автоматически добавлю <code>{html.escape(settings.pack_title_suffix)}</code>.",
+        + (f"Я автоматически добавлю <code>{html.escape(_title_suffix(message))}</code>." if _title_suffix(message) else ""),
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -431,6 +461,14 @@ async def sticker_pack_command(message: Message, state: FSMContext) -> None:
     await _start_sticker_pack(message, state)
 
 
+@router.message(Command("tgs_pack"))
+async def tgs_pack_command(message: Message, state: FSMContext) -> None:
+    if not _allowed(message):
+        await _reject(message)
+        return
+    await _start_tgs_pack(message, state)
+
+
 @router.message(Command("video_note"))
 async def video_note_command(message: Message, state: FSMContext) -> None:
     if not _allowed(message):
@@ -476,6 +514,9 @@ async def receive_mode(message: Message, state: FSMContext) -> None:
         return
     if mode in {"🖼 стикер пак", "стикер пак", "стикеры", "стикер", "stickers", "sticker"}:
         await _start_sticker_pack(message, state)
+        return
+    if mode in {"✨ tgs-пак", "tgs-пак", "tgs пак", "tgs"}:
+        await _start_tgs_pack(message, state)
         return
     if mode in {"🧩 собрать tg art", "собрать tg art", "собрать арт", "tg art из пака"}:
         await _start_existing_tg_art(message, state)
@@ -607,6 +648,7 @@ async def create_recipe_version(callback: CallbackQuery, state: FSMContext) -> N
     await _reset_flow(state)
     await state.update_data(recipe=recipe, recipe_version=True)
     if recipe.kind == "sticker" and recipe.sticker_format:
+        await state.update_data(sticker_type=recipe.sticker_type)
         await _start_sticker_collection(callback.message, state, recipe.sticker_format)
         if callback.message:
             await callback.message.edit_text(
@@ -835,9 +877,9 @@ async def receive_sticker_document(message: Message, state: FSMContext, bot: Bot
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
-    expected_kind = "image" if sticker_format == "static" else "video"
+    expected_kind = {"static": "image", "video": "video", "animated": "animated"}[sticker_format]
     if source_kind != expected_kind:
-        expected_label = "изображение" if expected_kind == "image" else "видео"
+        expected_label = {"image": "изображение", "video": "видео", "animated": "TGS-анимацию"}[expected_kind]
         await message.answer(f"Для этого набора нужно отправить {expected_label}.")
         return
     try:
@@ -867,7 +909,7 @@ async def receive_sticker_folder(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     sticker_format = data["sticker_format"]
-    expected_kind = "image" if sticker_format == "static" else "video"
+    expected_kind = {"static": "image", "video": "video", "animated": "animated"}[sticker_format]
     limit = _sticker_limit(sticker_format)
     sources = list(data.get("sticker_sources", []))
     accepted: list[Path] = []
@@ -971,7 +1013,7 @@ async def receive_sticker_pack_title(message: Message, state: FSMContext) -> Non
         await _reject(message)
         return
     try:
-        title = validate_pack_title(append_title_suffix(message.text or "", settings.pack_title_suffix))
+        title = _pack_title(message.text or "", message)
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
@@ -1038,6 +1080,7 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
             name=pack_name,
             emojis=data["sticker_emojis"],
             sticker_format=sticker_format,
+            sticker_type=data.get("sticker_type", "regular"),
             progress=report_progress,
             retry_notice=report_retry,
         )
@@ -1047,6 +1090,7 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
             pack_url=pack_url, kind="sticker", title=data["sticker_pack_title"],
             emoji=data["sticker_emojis"][0] if data["sticker_emojis"] else "🎨",
             sticker_format=sticker_format, emojis=tuple(data["sticker_emojis"]),
+            sticker_type=data.get("sticker_type", "regular"),
         ))
         await status.edit_text(
             f"Sticker pack создан: <a href=\"{pack_url}\">{html.escape(data['sticker_pack_title'])}</a>",
@@ -1143,8 +1187,8 @@ async def receive_grid(message: Message, state: FSMContext) -> None:
     await state.set_state(RenderFlow.waiting_for_pack_title)
     await _card(message, state,
         "Как будет называться пак? Это отображаемое название, например "
-        f"<code>My art</code>. Я автоматически добавлю "
-        f"<code>{html.escape(settings.pack_title_suffix)}</code>.",
+        f"<code>My art</code>. "
+        + (f"Я автоматически добавлю <code>{html.escape(_title_suffix(message))}</code>." if _title_suffix(message) else ""),
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -1155,9 +1199,7 @@ async def receive_pack_title(message: Message, state: FSMContext) -> None:
         await _reject(message)
         return
     try:
-        title = validate_pack_title(
-            append_title_suffix(message.text or "", settings.pack_title_suffix)
-        )
+        title = _pack_title(message.text or "", message)
     except ValueError as error:
         await _card(message, state, html.escape(str(error)))
         return
@@ -1373,7 +1415,7 @@ def _resume_keyboard(current, data, actor):
 def configure_interactions(value):
     video_note_flow.render = _render_and_send_video_note
     inbox_flow.config = SimpleNamespace(settings=value, reset=_reset_flow, set_source=_set_source,
-        start_stickers=_start_sticker_collection, finish_stickers=_finish_sticker_collection,
+        start_stickers=_start_sticker_collection, start_tgs=_start_tgs_pack, finish_stickers=_finish_sticker_collection,
         phase_hint=_phase_hint, resume_keyboard=_resume_keyboard)
 
 

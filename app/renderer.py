@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import gzip
 import shutil
 import tempfile
 import zipfile
@@ -384,8 +385,8 @@ async def prepare_sticker_files(
     ffprobe: str = "ffprobe",
 ) -> RenderResult:
     """Convert source files to static WebP or video WebM Telegram stickers."""
-    if sticker_format not in {"static", "video"}:
-        raise RenderError("Формат стикера должен быть static или video")
+    if sticker_format not in {"static", "animated", "video"}:
+        raise RenderError("Формат стикера должен быть static, animated или video")
     if not sources:
         raise RenderError("Нет файлов для создания набора")
     if max_static_size_kb < 1 or max_video_size_kb < 1:
@@ -398,6 +399,15 @@ async def prepare_sticker_files(
     files: List[Path] = []
     try:
         for index, source in enumerate(sources, start=1):
+            if sticker_format == "animated":
+                try:
+                    json.loads(gzip.decompress(source.read_bytes()).decode("utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise RenderError(f"{source.name} не является корректной TGS-анимацией") from error
+                destination = directory / f"sticker_{index:03d}.tgs"
+                shutil.copy2(source, destination)
+                files.append(destination)
+                continue
             info = await probe_video(source, ffprobe)
             if sticker_format == "static":
                 destination = directory / f"sticker_{index:03d}.webp"
@@ -416,7 +426,8 @@ async def prepare_sticker_files(
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
             for file in files:
                 zip_file.write(file, arcname=file.name)
-        return RenderResult(directory, archive, files, await probe_video(sources[0], ffprobe))
+        info = await probe_video(sources[0], ffprobe) if sticker_format != "animated" else VideoInfo(512, 512, 0, 0, "tgs", "lottie")
+        return RenderResult(directory, archive, files, info)
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise

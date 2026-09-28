@@ -168,14 +168,14 @@ async def create_sticker_pack(
 ) -> str:
     if not files:
         raise ValueError("Нет файлов для создания пака")
-    if sticker_format not in {"static", "video"}:
-        raise ValueError("Формат пака должен быть static или video")
+    if sticker_format not in {"static", "animated", "video"}:
+        raise ValueError("Формат пака должен быть static, animated или video")
     if sticker_type not in {"regular", "custom_emoji"}:
         raise ValueError("Тип пака должен быть regular или custom_emoji")
     if len(files) != len(emojis):
         raise ValueError("Для каждого файла должен быть указан эмодзи")
 
-    max_stickers = 200 if sticker_type == "custom_emoji" else (120 if sticker_format == "static" else 50)
+    max_stickers = 200 if sticker_type == "custom_emoji" else (50 if sticker_format == "video" else 120)
     if len(files) > max_stickers:
         raise ValueError(f"В таком наборе может быть не больше {max_stickers} стикеров")
 

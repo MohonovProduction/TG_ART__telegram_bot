@@ -63,7 +63,7 @@ class RichPostTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x['style'] for x in buttons], ['primary', 'danger', 'success'])
         self.assertTrue(all(x['url'] for x in buttons))
         self.assertEqual(result['messages'][0]['original_rich_message'], self.rich)
-        self.assertEqual([call[0] for call in self.bot.mock_calls if call[0] in ('send_message', '', 'send_document')], ['send_message', '', 'send_document'])
+        self.assertEqual([call[0] for call in self.bot.mock_calls if call[0] in ('send_message', '', 'send_document')], ['send_message', 'send_message', '', 'send_document'])
         self.assertEqual(json.loads(self.bot.send_document.call_args.kwargs['document'].data)['custom_emoji_count'], 29)
 
     async def test_api_rejection_falls_back_to_media_and_formatted_text(self):

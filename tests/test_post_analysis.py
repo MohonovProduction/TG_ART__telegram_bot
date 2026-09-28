@@ -64,15 +64,16 @@ class PostAnalysisTest(unittest.IsolatedAsyncioTestCase):
         result = await send_analysis([original], self.bot, 3, Path(self.directory.name))
         self.assertEqual(result['custom_emoji_count'], 1)
         self.assertEqual(result['emoji_packs'][0]['title'], 'Test Art')
-        self.assertEqual(self.bot.send_message.await_count, 2)
-        self.assertEqual(self.bot.send_message.await_args_list[1].kwargs['text'], '😀')
-        self.assertEqual(self.bot.send_message.await_args_list[1].kwargs['entities'], [])
+        self.assertEqual(self.bot.send_message.await_count, 3)
+        self.assertIn('служебные символы', self.bot.send_message.await_args_list[1].kwargs['text'])
+        self.assertEqual(self.bot.send_message.await_args_list[2].kwargs['text'], '😀')
+        self.assertEqual(self.bot.send_message.await_args_list[2].kwargs['entities'], [])
         payload = self.bot.send_document.await_args.kwargs['document']
         document = json.loads(payload.data)
         self.assertEqual(document['schema_version'], 1)
         self.assertEqual(document['messages'][0]['raw_message']['text'], '🎨')
         self.assertEqual(document['messages'][0]['replaced_text'], '😀')
-        self.assertEqual([call[0] for call in self.bot.mock_calls if call[0].startswith('send_')], ['send_message', 'send_message', 'send_document'])
+        self.assertEqual([call[0] for call in self.bot.mock_calls if call[0].startswith('send_')], ['send_message', 'send_message', 'send_message', 'send_document'])
 
     async def test_photo_caption_dimensions_and_copy(self):
         original = message(photo=[{'file_id': 'small', 'file_unique_id': 's', 'width': 100, 'height': 100}, {'file_id': 'large', 'file_unique_id': 'l', 'width': 1280, 'height': 720, 'file_size': 10000}], caption='🎨', caption_entities=[emoji(0)])

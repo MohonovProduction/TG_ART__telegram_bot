@@ -19,6 +19,7 @@ router = Router(name='content_first')
 config = None
 ART = '🎨 Создать TG Art'
 STICKERS = '🖼 Создать стикерпак'
+TGS_PACK = '✨ Создать TGS-пак'
 NOTE = '⭕ Сделать кружок'
 ANALYZE = '🔍 Анализировать'
 USER = '👤 Назначить пользователем'
@@ -42,6 +43,16 @@ class InboxFlow(StatesGroup):
 def media_sources(message):
     """Metadata only; downloads happen only after an action is selected."""
     sources = []
+    if message.sticker:
+        sticker = message.sticker
+        kind = 'animated' if sticker.is_animated else ('video' if sticker.is_video else 'image')
+        suffix = '.tgs' if kind == 'animated' else ('.webm' if kind == 'video' else '.webp')
+        sources.append({
+            'kind': kind,
+            'file_id': sticker.file_id,
+            'suffix': suffix,
+            'file_size': sticker.file_size or 0,
+        })
     if message.photo:
         photo = max(message.photo, key=lambda item: item.width * item.height)
         sources.append({'kind': 'image', 'file_id': photo.file_id, 'suffix': '.jpg', 'file_size': photo.file_size or 0})
@@ -76,10 +87,12 @@ def available_actions(messages, actor):
     media = [source for message in messages for source in media_sources(message)]
     album = any(message.media_group_id for message in messages)
     actions = []
-    if len(media) == 1 and not album:
+    if len(media) == 1 and not album and media[0]['kind'] in ('image', 'video'):
         actions.append(ART)
-    if media:
+    if any(source['kind'] in ('image', 'video') for source in media):
         actions.append(STICKERS)
+    if media and all(source['kind'] == 'animated' for source in media):
+        actions.append(TGS_PACK)
     if len(media) == 1 and media[0]['kind'] == 'video' and not album:
         actions.append(NOTE)
     actions.append(ANALYZE)
@@ -97,7 +110,7 @@ def action_keyboard(messages, actor):
 
 
 def received_content(message):
-    return bool(message.photo or message.video or message.animation or message.video_note or message.document or message.contact or message.forward_origin or rich_payload(message))
+    return bool(message.sticker or message.photo or message.video or message.animation or message.video_note or message.document or message.contact or message.forward_origin or rich_payload(message))
 
 
 def stored_messages(data, key='inbox_messages'):
@@ -150,7 +163,7 @@ class ContentFirstMiddleware(BaseMiddleware):
         if current == 'RenderFlow:waiting_for_video_note_source' and len(media_sources(event)) == 1 and media_sources(event)[0]['kind'] == 'video' and not rich_payload(event):
             return await handler(event, data)
         if current == 'RenderFlow:collecting_stickers' and media_sources(event) and not rich_payload(event):
-            expected = 'image' if old_data['sticker_format'] == 'static' else 'video'
+            expected = {'static': 'image', 'video': 'video', 'animated': 'animated'}[old_data['sticker_format']]
             if all(source['kind'] == expected for source in media_sources(event)):
                 await append_stickers(event, state, data['bot'])
                 return
@@ -200,12 +213,12 @@ async def download_source(source, message, bot):
 async def append_stickers(message, state, bot, sources=None):
     data = await state.get_data()
     sources = media_sources(message) if sources is None else sources
-    expected = 'image' if data['sticker_format'] == 'static' else 'video'
+    expected = {'static': 'image', 'video': 'video', 'animated': 'animated'}[data['sticker_format']]
     if any(source['kind'] != expected for source in sources):
         await message.answer('Тип файла не подходит к этому паку. Отправьте изображение для статичного пака или видео для видео-пака.', reply_markup=COLLECT_KEYBOARD)
         return
     paths = list(data.get('sticker_sources', []))
-    limit = 120 if expected == 'image' else 50
+    limit = 50 if expected == 'video' else 120
     if len(paths) + len(sources) > limit:
         await message.answer(f'В паке может быть не больше {limit} стикеров.', reply_markup=COLLECT_KEYBOARD)
         return
@@ -259,6 +272,10 @@ async def choose_action(message, state, bot):
             await message.answer('Анализирую полученное содержимое…', reply_markup=ReplyKeyboardRemove())
             await send_analysis(messages, bot, message.chat.id, config.settings.temp_dir)
             await state.clear()
+        elif action == TGS_PACK:
+            await config.reset(state)
+            await config.start_tgs(message, state)
+            await state.update_data(pending_tgs_sources=sources)
         else:
             sources = [source for item in messages for source in media_sources(item)]
             if action == STICKERS:
@@ -272,14 +289,6 @@ async def choose_action(message, state, bot):
             else:
                 await state.set_state(InboxFlow.processing)
                 path = await download_source(sources[0], message, bot)
-                if action == ART and sources[0]['kind'] == 'video':
-                    try:
-                        info = await probe_video(path)
-                        if not info.has_alpha:
-                            raise RenderError('Для TG Art нужно видео с alpha-каналом. Выберите стикерпак или кружок.')
-                    except BaseException:
-                        path.unlink(missing_ok=True)
-                        raise
                 await config.reset(state)
                 if action == ART:
                     await config.set_source(message, state, path, True, sources[0]['kind'])
@@ -302,8 +311,6 @@ async def accept_art_video(message, state, bot):
     try:
         source = media_sources(message)[0]
         path = await download_source(source, message, bot)
-        if not (await probe_video(path)).has_alpha:
-            raise RenderError('Для TG Art нужно видео с alpha-каналом. Отправьте другой файл или /cancel.')
         await config.set_source(message, state, path, True, 'video')
     except (TelegramAPIError, OSError, RenderError) as error:
         if path and (await state.get_data()).get('source') != str(path):

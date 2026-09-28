@@ -92,7 +92,7 @@ The following environment variables are available:
 | `MAX_VIDEO_STICKER_SIZE_KB` | `256` | Maximum size of each converted video sticker |
 | `MAX_JOB_INPUT_MB` | `500` | Maximum total size of source files in one job |
 | `JOB_RESULT_TTL_SECONDS` | `3600` | Retention for orphaned renderer results after a restart |
-| `PACK_TITLE_SUFFIX` | `by @mohonovproduction` | Text automatically appended to pack titles |
+| `PACK_TITLE_SUFFIX` | — | Deprecated: pack titles now receive `by @username` of the user who creates them |
 | `LOG_CHANNEL_ID` | empty | Private channel ID for non-owner activity logs; add the bot there as an administrator |
 | `RECIPE_TTL_SECONDS` | `3600` | Lifetime of the “Create a new version” and delete buttons after pack creation |
 
@@ -212,6 +212,7 @@ When the bot is managed as a macOS background service, its logs are stored in
 1. Send `/start` and choose **TG Art**, **Стикер пак**, or **Кружок из видео**.
 2. For **TG Art**, upload an image or any supported video as a document (or provide a local file path), enter the grid size, pack title, link name, and one emoji. Alpha is preserved when present; a regular video produces opaque tiles.
 3. For **Стикер пак**, choose **Статичные** or **Видео**.
+4. For **TGS-пак**, send one or more `.tgs` files, then choose emoji, title, and link name.
 4. Send every source file as a document, or provide an absolute path to a folder on the computer running the bot. Send `/done` when the list is complete.
 5. Choose one common emoji or assign an emoji to every sticker in sequence, then enter the title and link name.
 6. For a video note, send a Telegram video, a video as a document, or an absolute

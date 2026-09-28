@@ -113,6 +113,10 @@ async def _begin_collection(message: Message, state: FSMContext, destination: Pa
     await state.update_data(download_root=str(destination), download_assets=[])
     await state.set_state(DownloadFlow.collecting)
     await message.answer(
+        "Что можно сохранить:\n\n"
+        "• Статичные стикеры и emoji — PNG.\n"
+        "• Видео-стикеры и video emoji — MOV ProRes 4444 с alpha.\n"
+        "• TGS-анимации — MOV ProRes 4444 с alpha.\n\n"
         "Присылайте стикеры, сообщения с Custom Emoji или ссылки на наборы "
         "<code>t.me/addstickers/...</code> / <code>t.me/addemoji/...</code>.\n\n"
         "Добавлено: <b>0</b>. Когда закончите, нажмите «Сохранить».",

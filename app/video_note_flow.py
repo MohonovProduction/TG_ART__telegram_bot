@@ -36,7 +36,14 @@ class VideoNoteFlow(StatesGroup):
 async def start_options(message, state, source, temporary):
     await state.update_data(video_note_source=str(source), video_note_temporary=temporary)
     await state.set_state(VideoNoteFlow.mode)
-    await message.answer('Как разместить видео в кружке? Cover — обрезать края, Fit — вписать с полями, Fill — растянуть. Углы видео скроются под круглой маской Telegram.', reply_markup=MODE_KEYBOARD)
+    await message.answer(
+        'Как разместить видео в кружке?\n\n'
+        '• <b>Cover</b> — обрезать края.\n'
+        '• <b>Fit</b> — вписать с полями.\n'
+        '• <b>Fill</b> — растянуть.\n\n'
+        'Углы видео скроются под круглой маской Telegram.',
+        reply_markup=MODE_KEYBOARD,
+    )
 
 
 async def execute(message, state, **options):
