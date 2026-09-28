@@ -27,9 +27,9 @@ async def show_users(message, state):
     entries = access.store.users()
     def display(entry):
         uid, role, username, first_name, last_name = entry
-        name = ' '.join(item for item in (first_name, last_name) if item) or 'Без имени'
+        name = html.escape(' '.join(item for item in (first_name, last_name) if item) or 'Без имени')
         handle = f' @{html.escape(username)}' if username else ''
-        return f'{html.escape(name)}{handle} · <code>{uid}</code> · {html.escape(role)}'
+        return f'{name}{handle} · <code>{uid}</code> · {role}'
     text = 'Пользователи:\n' + '\n'.join(display(entry) for entry in entries)
     for offset in range(0, len(text), 3500):
         await message.answer(text[offset:offset + 3500])

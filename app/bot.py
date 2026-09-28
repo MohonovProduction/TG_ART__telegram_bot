@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import re
 import secrets
 import shutil
@@ -83,6 +84,7 @@ class RenderFlow(StatesGroup):
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 settings: Settings
 tg_art_previews = PreviewCache()
 heavy_jobs: HeavyJobQueue
@@ -146,19 +148,17 @@ def _allowed(message: Message) -> bool:
 
 
 async def _card(message: Message, state: FSMContext, text: str, reply_markup=None) -> Message:
-    """Keep prompts and progress in one editable operation card when possible."""
-    # Reply keyboards cannot be attached/changed with editMessageText. The main menu
-    # remains available, while the operation card itself is always editable.
-    if reply_markup is not None and not isinstance(reply_markup, InlineKeyboardMarkup):
-        reply_markup = None
+    """Keep exactly one current operation card, always visible at chat bottom.
+
+    Telegram leaves an edited message at its original position and can't edit reply
+    keyboards. Replacing the previous bot-owned card keeps the chat clean *and*
+    makes the next question discoverable.
+    """
     data = await state.get_data()
     message_id = data.get("operation_message_id")
     if message_id:
         try:
-            await message.bot.edit_message_text(
-                chat_id=message.chat.id, message_id=message_id, text=text, reply_markup=reply_markup
-            )
-            return message
+            await message.bot.delete_message(chat_id=message.chat.id, message_id=message_id)
         except TelegramAPIError:
             pass
     card = await message.answer(text, reply_markup=reply_markup)
@@ -244,7 +244,15 @@ async def _run_heavy_job(message: Message, work):
     async def queued(position: int) -> None:
         await message.answer(f"Задача в очереди, позиция: <b>{position}</b>. Начну, когда освободится место.")
 
-    return await heavy_jobs.run(message.from_user.id, queued, work)
+    user_id = message.from_user.id
+    logger.info("Heavy job queued: user=%s", user_id)
+    try:
+        result = await heavy_jobs.run(user_id, queued, work)
+        logger.info("Heavy job completed: user=%s", user_id)
+        return result
+    except Exception:
+        logger.exception("Heavy job failed: user=%s", user_id)
+        raise
 
 
 async def _start_emoji_pack(message: Message, state: FSMContext) -> None:
@@ -328,11 +336,9 @@ async def _set_source(
     await state.set_state(RenderFlow.waiting_for_grid)
     await _card(message, state,
         "Исходник принят. Отправьте размер сетки в формате <code>5x3</code> "
-        "(столбцы × строки), либо выберите правый нижний угол кнопкой."
+        "(столбцы × строки), либо выберите правый нижний угол кнопкой.",
+        reply_markup=grid_keyboard(),
     )
-    # Grid selection is a Telegram reply keyboard; unlike inline buttons, it cannot
-    # be embedded into an editable message.
-    await message.answer("Выбор сетки:", reply_markup=grid_keyboard())
 
 
 async def _start_sticker_collection(message: Message, state: FSMContext, sticker_format: str) -> None:
@@ -1373,6 +1379,7 @@ def configure_interactions(value):
 
 async def main() -> None:
     global settings, heavy_jobs, recipes, activity_logger
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = Settings.from_env()
     heavy_jobs = HeavyJobQueue(settings.max_concurrent_jobs)
     recipes = RecipeCache(settings.recipe_ttl_seconds)
