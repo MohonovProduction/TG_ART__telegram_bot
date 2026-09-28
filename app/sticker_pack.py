@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence, Union
 
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
 
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 
 def parse_custom_emoji_pack_name(value: str) -> str:
@@ -111,6 +114,22 @@ def validate_pack_emoji(value: str) -> str:
         raise ValueError("Отправьте один эмодзи, а не строку текста")
     if emoji.isascii() and emoji.isalnum():
         raise ValueError("Нужен эмодзи, например 🎨")
+    bases = []
+    has_joiner = "\u200d" in emoji
+    for character in emoji:
+        codepoint = ord(character)
+        if character in ("\u200d", "\ufe0e", "\ufe0f") or unicodedata.combining(character):
+            continue
+        if 0x1F3FB <= codepoint <= 0x1F3FF:  # skin tone belongs to the preceding emoji
+            continue
+        if unicodedata.category(character) in {"So", "Sk"}:
+            bases.append(character)
+    regional_indicator_pair = (
+        len(bases) == 2
+        and all(0x1F1E6 <= ord(character) <= 0x1F1FF for character in bases)
+    )
+    if len(bases) > 1 and not has_joiner and not regional_indicator_pair:
+        raise ValueError("Отправьте один emoji для этого стикера. Несколько emoji нужно назначать по одному.")
     return emoji
 
 
@@ -194,6 +213,7 @@ async def create_sticker_pack(
         await progress(1, total)
 
     for index, path in enumerate(files[1:], start=2):
+        logger.info("Uploading sticker %s/%s (format=%s)", index, total, sticker_format)
         sticker = await _upload_sticker(bot, user_id, path, emojis[index - 1], sticker_format, retry_notice)
         await retry_telegram(lambda: bot.add_sticker_to_set(
             user_id=user_id, name=name, sticker=sticker, request_timeout=120,

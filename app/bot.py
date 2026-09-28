@@ -204,6 +204,22 @@ def _pack_title(value: str, message: Message) -> str:
     return validate_pack_title(append_title_suffix(value, _title_suffix(message)))
 
 
+async def _message_pack_emoji(message: Message, bot: Bot) -> str:
+    custom_ids = [
+        entity.custom_emoji_id for entity in (message.entities or [])
+        if entity.type == "custom_emoji" and entity.custom_emoji_id
+    ]
+    if custom_ids:
+        stickers = await bot.get_custom_emoji_stickers(custom_emoji_ids=[custom_ids[0]])
+        fallback = stickers[0].emoji if stickers else None
+        if fallback:
+            return validate_pack_emoji(fallback)
+        raise ValueError(
+            "У этого custom emoji нет Unicode fallback. Отправьте обычный emoji, например 🎨, 😀 или ❤️."
+        )
+    return validate_pack_emoji(message.text or "")
+
+
 def _natural_path_key(path: Path) -> list[object]:
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
@@ -958,7 +974,7 @@ async def receive_common_sticker_emoji(message: Message, state: FSMContext) -> N
         await _reject(message)
         return
     try:
-        emoji = validate_pack_emoji(message.text or "")
+        emoji = await _message_pack_emoji(message, message.bot)
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
@@ -973,7 +989,7 @@ async def receive_individual_sticker_emoji(message: Message, state: FSMContext) 
         await _reject(message)
         return
     try:
-        emoji = validate_pack_emoji(message.text or "")
+        emoji = await _message_pack_emoji(message, message.bot)
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
@@ -1105,6 +1121,14 @@ async def receive_sticker_pack_name(message: Message, state: FSMContext, bot: Bo
         await activity_logger.event(bot, message.from_user, "Sticker pack", "ошибка конвертации")
         await message.answer(f"Конвертация не выполнена:\n<code>{html.escape(str(error)[:3500])}</code>")
     except TelegramAPIError as error:
+        logger.exception(
+            "Sticker pack creation failed: user=%s name=%s format=%s type=%s files=%s",
+            message.from_user.id,
+            pack_name,
+            sticker_format,
+            data.get("sticker_type", "regular"),
+            len(sources),
+        )
         await activity_logger.event(bot, message.from_user, "Sticker pack", "ошибка Telegram")
         await message.answer(f"Telegram не смог создать пак:\n<code>{html.escape(str(error)[:3000])}</code>")
     except Exception as error:
@@ -1245,7 +1269,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
         await _reject(message)
         return
     try:
-        emoji = validate_pack_emoji(message.text or "")
+        emoji = await _message_pack_emoji(message, bot)
     except (ValueError, TelegramAPIError) as error:
         await message.answer(html.escape(str(error)))
         return

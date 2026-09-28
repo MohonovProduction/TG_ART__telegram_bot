@@ -76,6 +76,10 @@ class RendererTests(unittest.TestCase):
     def test_pack_values(self):
         self.assertEqual(validate_pack_title(" My pack "), "My pack")
         self.assertEqual(validate_pack_emoji(" 🎨 "), "🎨")
+        self.assertEqual(validate_pack_emoji("😮‍💨"), "😮‍💨")
+        self.assertEqual(validate_pack_emoji("🇷🇺"), "🇷🇺")
+        with self.assertRaises(ValueError):
+            validate_pack_emoji("♥️💜")
         with self.assertRaises(ValueError):
             make_sticker_set_name("123", "MyArtBot")
 
