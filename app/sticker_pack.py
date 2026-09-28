@@ -106,31 +106,67 @@ def validate_pack_title(value: str) -> str:
     return title
 
 
-def validate_pack_emoji(value: str) -> str:
-    emoji = value.strip()
-    if not emoji or any(character.isspace() for character in emoji):
-        raise ValueError("Отправьте один эмодзи без пробелов")
-    if len(emoji) > 32:
-        raise ValueError("Отправьте один эмодзи, а не строку текста")
-    if emoji.isascii() and emoji.isalnum():
-        raise ValueError("Нужен эмодзи, например 🎨")
-    bases = []
-    has_joiner = "\u200d" in emoji
-    for character in emoji:
-        codepoint = ord(character)
-        if character in ("\u200d", "\ufe0e", "\ufe0f") or unicodedata.combining(character):
-            continue
-        if 0x1F3FB <= codepoint <= 0x1F3FF:  # skin tone belongs to the preceding emoji
-            continue
-        if unicodedata.category(character) in {"So", "Sk"}:
-            bases.append(character)
-    regional_indicator_pair = (
-        len(bases) == 2
-        and all(0x1F1E6 <= ord(character) <= 0x1F1FF for character in bases)
+def _is_emoji_base(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x1F000 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or codepoint in {0x00A9, 0x00AE, 0x2122, 0x3030, 0x303D, 0x3297, 0x3299}
     )
-    if len(bases) > 1 and not has_joiner and not regional_indicator_pair:
-        raise ValueError("Отправьте один emoji для этого стикера. Несколько emoji нужно назначать по одному.")
-    return emoji
+
+
+def _consume_emoji_tail(value: str, index: int) -> int:
+    """Consume variation selectors, modifiers, keycaps and tag characters."""
+    while index < len(value):
+        codepoint = ord(value[index])
+        if value[index] in {"\ufe0e", "\ufe0f", "\u20e3"} or unicodedata.combining(value[index]):
+            index += 1
+        elif 0x1F3FB <= codepoint <= 0x1F3FF or 0xE0020 <= codepoint <= 0xE007F:
+            index += 1
+        else:
+            break
+    return index
+
+
+def split_pack_emojis(value: str) -> list[str]:
+    """Split a Unicode emoji sequence, accepting spaces and line breaks as separators."""
+    emojis: list[str] = []
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character.isspace():
+            index += 1
+            continue
+
+        is_keycap = character in "#*0123456789" and (
+            index + 1 < len(value)
+            and value[index + 1] in {"\ufe0e", "\ufe0f", "\u20e3"}
+        )
+        if not _is_emoji_base(character) and not is_keycap:
+            raise ValueError("В списке должны быть только emoji, разделённые пробелами или переносами строк")
+
+        start = index
+        regional_indicator = 0x1F1E6 <= ord(character) <= 0x1F1FF
+        index = _consume_emoji_tail(value, index + 1)
+        if regional_indicator and index < len(value) and 0x1F1E6 <= ord(value[index]) <= 0x1F1FF:
+            index = _consume_emoji_tail(value, index + 1)
+
+        while index < len(value) and value[index] == "\u200d":
+            if index + 1 >= len(value) or not _is_emoji_base(value[index + 1]):
+                raise ValueError("Не удалось распознать emoji после символа соединения")
+            index = _consume_emoji_tail(value, index + 2)
+        emojis.append(value[start:index])
+
+    if not emojis:
+        raise ValueError("Отправьте хотя бы один emoji")
+    return emojis
+
+
+def validate_pack_emoji(value: str) -> str:
+    emojis = split_pack_emojis(value)
+    if len(emojis) != 1:
+        raise ValueError("Отправьте один emoji")
+    return emojis[0]
 
 
 async def _upload_sticker(
@@ -154,7 +190,7 @@ async def create_custom_emoji_pack(
     files: Sequence[Path],
     title: str,
     name: str,
-    emoji: str,
+    emojis: Sequence[str] | str,
     sticker_format: str = "video",
     progress: Optional[ProgressCallback] = None,
     retry_notice: RetryNotice | None = None,
@@ -165,7 +201,7 @@ async def create_custom_emoji_pack(
         files=files,
         title=title,
         name=name,
-        emojis=[emoji] * len(files),
+        emojis=[emojis] * len(files) if isinstance(emojis, str) else emojis,
         sticker_format=sticker_format,
         sticker_type="custom_emoji",
         progress=progress,

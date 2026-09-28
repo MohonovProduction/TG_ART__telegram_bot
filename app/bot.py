@@ -59,6 +59,7 @@ from app.sticker_pack import (
     create_sticker_pack,
     make_sticker_set_name,
     parse_custom_emoji_pack_name,
+    split_pack_emojis,
     validate_pack_emoji,
     validate_pack_title,
 )
@@ -141,7 +142,7 @@ STICKER_KIND_KEYBOARD = ReplyKeyboardMarkup(
     one_time_keyboard=True,
 )
 EMOJI_MODE_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Один эмодзи для всех"), KeyboardButton(text="Отдельный эмодзи каждому")]],
+    keyboard=[[KeyboardButton(text="Один эмодзи для всех"), KeyboardButton(text="Список эмодзи")]],
     resize_keyboard=True,
     one_time_keyboard=True,
 )
@@ -204,20 +205,25 @@ def _pack_title(value: str, message: Message) -> str:
     return validate_pack_title(append_title_suffix(value, _title_suffix(message)))
 
 
-async def _message_pack_emoji(message: Message, bot: Bot) -> str:
+async def _message_pack_emojis(message: Message, bot: Bot) -> list[str]:
     custom_ids = [
         entity.custom_emoji_id for entity in (message.entities or [])
         if entity.type == "custom_emoji" and entity.custom_emoji_id
     ]
     if custom_ids:
-        stickers = await bot.get_custom_emoji_stickers(custom_emoji_ids=[custom_ids[0]])
-        fallback = stickers[0].emoji if stickers else None
-        if fallback:
-            return validate_pack_emoji(fallback)
-        raise ValueError(
-            "У этого custom emoji нет Unicode fallback. Отправьте обычный emoji, например 🎨, 😀 или ❤️."
-        )
-    return validate_pack_emoji(message.text or "")
+        stickers = await bot.get_custom_emoji_stickers(custom_emoji_ids=custom_ids)
+        fallbacks = [sticker.emoji for sticker in stickers if sticker.emoji]
+        if len(fallbacks) == len(custom_ids):
+            return [validate_pack_emoji(fallback) for fallback in fallbacks]
+        raise ValueError("У custom emoji нет Unicode fallback. Отправьте обычные emoji, например 🎨, 😀 или ❤️.")
+    return split_pack_emojis(message.text or "")
+
+
+async def _message_pack_emoji(message: Message, bot: Bot) -> str:
+    emojis = await _message_pack_emojis(message, bot)
+    if len(emojis) != 1:
+        raise ValueError("Отправьте один emoji")
+    return emojis[0]
 
 
 def _natural_path_key(path: Path) -> list[object]:
@@ -960,10 +966,14 @@ async def receive_sticker_emoji_mode(message: Message, state: FSMContext) -> Non
         await state.set_state(RenderFlow.waiting_for_common_sticker_emoji)
         await message.answer("Отправьте один эмодзи для всех стикеров.", reply_markup=ReplyKeyboardRemove())
         return
-    if value in {"отдельный эмодзи каждому", "отдельный", "каждому"}:
-        await state.update_data(sticker_emojis=[], individual_emoji_index=0)
+    if value in {"список эмодзи", "список", "отдельный эмодзи каждому", "отдельный", "каждому"}:
         await state.set_state(RenderFlow.waiting_for_individual_sticker_emoji)
-        await message.answer("Отправьте эмодзи для стикера 1.", reply_markup=ReplyKeyboardRemove())
+        total = len((await state.get_data())["sticker_sources"])
+        await message.answer(
+            f"Отправьте <b>{total}</b> emoji одним сообщением: подряд в строке или по одному с новой строки. "
+            "Каждый emoji будет назначен соответствующему файлу.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         return
     await message.answer("Выберите способ назначения эмодзи.", reply_markup=EMOJI_MODE_KEYBOARD)
 
@@ -974,12 +984,15 @@ async def receive_common_sticker_emoji(message: Message, state: FSMContext) -> N
         await _reject(message)
         return
     try:
-        emoji = await _message_pack_emoji(message, message.bot)
+        emojis = await _message_pack_emojis(message, message.bot)
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
     data = await state.get_data()
-    await state.update_data(sticker_emojis=[emoji] * len(data["sticker_sources"]))
+    if len(emojis) != 1:
+        await message.answer("Для общего назначения отправьте один emoji.")
+        return
+    await state.update_data(sticker_emojis=emojis * len(data["sticker_sources"]))
     await _ask_sticker_pack_title(message, state)
 
 
@@ -989,20 +1002,17 @@ async def receive_individual_sticker_emoji(message: Message, state: FSMContext) 
         await _reject(message)
         return
     try:
-        emoji = await _message_pack_emoji(message, message.bot)
+        emojis = await _message_pack_emojis(message, message.bot)
     except ValueError as error:
         await message.answer(html.escape(str(error)))
         return
     data = await state.get_data()
-    emojis = list(data.get("sticker_emojis", []))
-    emojis.append(emoji)
     total = len(data["sticker_sources"])
-    if len(emojis) == total:
-        await state.update_data(sticker_emojis=emojis)
-        await _ask_sticker_pack_title(message, state)
+    if len(emojis) != total:
+        await message.answer(f"Получено emoji: <b>{len(emojis)}</b>, а файлов: <b>{total}</b>. Исправьте список и отправьте его целиком ещё раз.")
         return
-    await state.update_data(sticker_emojis=emojis, individual_emoji_index=len(emojis))
-    await message.answer(f"Отправьте эмодзи для стикера {len(emojis) + 1} из {total}.")
+    await state.update_data(sticker_emojis=emojis)
+    await _ask_sticker_pack_title(message, state)
 
 
 async def _suggest_name(message: Message, state: FSMContext, base: str | None = None) -> None:
@@ -1256,9 +1266,11 @@ async def receive_pack_name(message: Message, state: FSMContext, bot: Bot) -> No
 
     await state.update_data(pack_name=pack_name)
     await state.set_state(RenderFlow.waiting_for_emoji)
+    data = await state.get_data()
+    cell_count = int(data["columns"]) * int(data["rows"])
     await _card(message, state,
-        "Теперь отправьте <b>один эмодзи</b>. Он будет назначен всем video emoji "
-        "в этом паке, например 🎨.",
+        f"Отправьте <b>{cell_count}</b> emoji одним сообщением: подряд в строке или по одному с новой строки. "
+        "Каждый emoji будет назначен соответствующей ячейке TG Art.",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -1269,7 +1281,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
         await _reject(message)
         return
     try:
-        emoji = await _message_pack_emoji(message, bot)
+        emojis = await _message_pack_emojis(message, bot)
     except (ValueError, TelegramAPIError) as error:
         await message.answer(html.escape(str(error)))
         return
@@ -1278,6 +1290,13 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
     source = Path(data["source"])
     source_kind = data["source_kind"]
     columns, rows = int(data["columns"]), int(data["rows"])
+    expected_count = columns * rows
+    if len(emojis) != expected_count:
+        await message.answer(
+            f"Получено emoji: <b>{len(emojis)}</b>, а ячеек TG Art: <b>{expected_count}</b>. "
+            "Исправьте список и отправьте его целиком ещё раз."
+        )
+        return
     await _card(message, state, f"Рендерю сетку {columns}×{rows}. Это может занять несколько минут…")
     action_task = await _chat_action(message, "choose_sticker")
     try:
@@ -1323,7 +1342,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
             files=result.files,
             title=data["pack_title"],
             name=data["pack_name"],
-            emoji=emoji,
+            emojis=emojis,
             sticker_format="static" if source_kind == "image" else "video",
             progress=report_progress,
             retry_notice=report_retry,
@@ -1334,12 +1353,12 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
             "pack_name": data["pack_name"],
             "columns": columns,
             "rows": rows,
-            "fallback_emoji": emoji,
+            "fallback_emojis": emojis,
         })
         recipe_token = secrets.token_urlsafe(8)
         recipes.put(Recipe(
             token=recipe_token, owner_id=message.from_user.id, pack_name=data["pack_name"],
-            pack_url=pack_url, kind="tg_art", title=data["pack_title"], emoji=emoji,
+            pack_url=pack_url, kind="tg_art", title=data["pack_title"], emoji=emojis[0], emojis=tuple(emojis),
             columns=columns, rows=rows,
         ))
         buttons = [
@@ -1355,7 +1374,7 @@ async def receive_emoji(message: Message, state: FSMContext, bot: Bot) -> None:
         )
         sticker_set = await bot.get_sticker_set(data["pack_name"])
         tg_art, entities = build_tg_art_grid(
-            [item.custom_emoji_id for item in sticker_set.stickers if item.custom_emoji_id], columns, rows, emoji
+            [item.custom_emoji_id for item in sticker_set.stickers if item.custom_emoji_id], columns, rows, emojis
         )
         await activity_logger.tg_art(bot, message.from_user, pack_url, tg_art, entities)
     except (RenderError, JobAlreadyRunning, JobCancelled) as error:

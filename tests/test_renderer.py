@@ -34,6 +34,7 @@ from app.sticker_pack import (
     build_tg_art_grid,
     make_sticker_set_name,
     parse_custom_emoji_pack_name,
+    split_pack_emojis,
     validate_pack_emoji,
     validate_pack_title,
 )
@@ -82,6 +83,11 @@ class RendererTests(unittest.TestCase):
             validate_pack_emoji("♥️💜")
         with self.assertRaises(ValueError):
             make_sticker_set_name("123", "MyArtBot")
+
+    def test_split_pack_emojis_supports_lines_and_compound_emoji(self):
+        self.assertEqual(split_pack_emojis("😮‍💨\n♥️💜\n🇷🇺"), ["😮‍💨", "♥️", "💜", "🇷🇺"])
+        with self.assertRaises(ValueError):
+            split_pack_emojis("🎨 text")
 
     def test_tg_art_grid_uses_custom_emoji_in_grid_order(self):
         text, entities = build_tg_art_grid(
