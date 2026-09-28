@@ -39,6 +39,7 @@ from app.sticker_pack import (
     validate_pack_title,
 )
 from app.tgs_renderer import normalize_hex_color, parse_render_size, render_tgs_to_mov
+from app.telegram_serialization import telegram_model_dump
 
 
 class RendererTests(unittest.TestCase):
@@ -88,6 +89,13 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(split_pack_emojis("😮‍💨\n♥️💜\n🇷🇺"), ["😮‍💨", "♥️", "💜", "🇷🇺"])
         with self.assertRaises(ValueError):
             split_pack_emojis("🎨 text")
+
+    def test_telegram_dump_omits_aiogram_default_values(self):
+        from aiogram.client.default import Default
+        from aiogram.types import LinkPreviewOptions
+
+        dumped = telegram_model_dump(LinkPreviewOptions(is_disabled=Default("link_preview_is_disabled")))
+        self.assertEqual(dumped, {})
 
     def test_tg_art_grid_uses_custom_emoji_in_grid_order(self):
         text, entities = build_tg_art_grid(

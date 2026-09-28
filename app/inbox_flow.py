@@ -14,6 +14,7 @@ from app.rich_message import rich_payload, walk_tree
 from app.renderer import probe_video, RenderError
 from app.post_analysis import send_analysis
 from app.telegram_retry import retry_telegram
+from app.telegram_serialization import telegram_model_dump
 
 router = Router(name='content_first')
 config = None
@@ -119,7 +120,7 @@ def stored_messages(data, key='inbox_messages'):
 
 async def offer(message, state):
     await state.set_state(InboxFlow.choosing)
-    await state.update_data(inbox_messages=[message.model_dump(mode='json', exclude_none=True)])
+    await state.update_data(inbox_messages=[telegram_model_dump(message)])
     await message.answer('Сообщение получено. Что сделать с ним? Если это альбом, дождитесь получения всех его частей.', reply_markup=action_keyboard([message], message.from_user.id))
 
 
@@ -142,7 +143,7 @@ async def replace_pending(message, state):
     await state.set_state(data.get('inbox_resume_state'))
     await config.reset(state)
     await state.set_state(InboxFlow.choosing)
-    await state.update_data(inbox_messages=[m.model_dump(mode='json', exclude_none=True) for m in incoming])
+    await state.update_data(inbox_messages=[telegram_model_dump(m) for m in incoming])
     await message.answer('Выберите действие с новым содержимым.', reply_markup=action_keyboard(incoming, message.from_user.id))
 
 
@@ -178,19 +179,19 @@ class ContentFirstMiddleware(BaseMiddleware):
                 previous_actions = available_actions(existing, event.from_user.id)
                 if not any(m.message_id == event.message_id for m in existing):
                     existing.append(event)
-                await state.update_data(inbox_messages=[m.model_dump(mode='json', exclude_none=True) for m in existing])
+                await state.update_data(inbox_messages=[telegram_model_dump(m) for m in existing])
                 if current == InboxFlow.choosing.state and available_actions(existing, event.from_user.id) != previous_actions:
                     await event.answer(f'Получено элементов альбома: {len(existing)}. Выберите действие после получения всех частей.', reply_markup=action_keyboard(existing, event.from_user.id))
                 return
             if current == InboxFlow.switching.state:
-                await state.update_data(inbox_messages=[event.model_dump(mode='json', exclude_none=True)])
+                await state.update_data(inbox_messages=[telegram_model_dump(event)])
                 await event.answer('Получено новое содержимое. Выберите, продолжить ли прежнюю операцию.', reply_markup=SWITCH_KEYBOARD)
                 return
         if current is None or current == 'RenderFlow:waiting_for_mode':
             await config.reset(state)
             await offer(event, state)
         else:
-            await state.set_data({'inbox_resume_state': current, 'inbox_resume_data': old_data, 'inbox_messages': [event.model_dump(mode='json', exclude_none=True)]})
+            await state.set_data({'inbox_resume_state': current, 'inbox_resume_data': old_data, 'inbox_messages': [telegram_model_dump(event)]})
             await state.set_state(InboxFlow.switching)
             await event.answer('Сейчас идёт другая операция. ' + config.phase_hint(current) + '\nИспользовать полученное содержимое для новой операции?', reply_markup=SWITCH_KEYBOARD)
         return

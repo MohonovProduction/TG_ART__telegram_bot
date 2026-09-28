@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from aiogram.exceptions import TelegramAPIError
+from app.telegram_serialization import telegram_model_dump
 from aiogram.types import Message, MessageEntity, InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument, InputPollOption, BufferedInputFile
 from app.rich_message import rich_payload, walk_tree, flatten_rich_message, replace_rich_emoji, input_rich_message, rich_structure, SendRichMessage, MEDIA_TYPES, block_text
 from app.renderer import probe_video, RenderError
@@ -79,26 +80,26 @@ async def media_metadata(message, bot, temp_dir):
     result = []
     if message.photo:
         photo = max(message.photo, key=lambda item: item.width * item.height)
-        result.append({'type': 'photo', **photo.model_dump(mode='json', exclude_none=True), 'available_sizes': [x.model_dump(mode='json', exclude_none=True) for x in message.photo]})
+        result.append({'type': 'photo', **telegram_model_dump(photo), 'available_sizes': [telegram_model_dump(x) for x in message.photo]})
     if message.game and message.game.photo:
         photo = max(message.game.photo, key=lambda item: item.width * item.height)
-        result.append({'type': 'game_photo', **photo.model_dump(mode='json', exclude_none=True)})
+        result.append({'type': 'game_photo', **telegram_model_dump(photo)})
     if message.paid_media:
         for attachment in message.paid_media.paid_media:
             photos = getattr(attachment, 'photo', None)
             video = getattr(attachment, 'video', None)
             if photos:
                 photo = max(photos, key=lambda item: item.width * item.height)
-                result.append({'type': 'paid_photo', **photo.model_dump(mode='json', exclude_none=True)})
+                result.append({'type': 'paid_photo', **telegram_model_dump(photo)})
             elif video:
-                result.append({'type': 'paid_video', **video.model_dump(mode='json', exclude_none=True)})
+                result.append({'type': 'paid_video', **telegram_model_dump(video)})
             else:
-                result.append({'type': 'paid_preview', **attachment.model_dump(mode='json', exclude_none=True)})
+                result.append({'type': 'paid_preview', **telegram_model_dump(attachment)})
     for kind in ('video', 'animation', 'document', 'audio', 'voice', 'video_note', 'sticker'):
         media = getattr(message, kind, None)
         if not media:
             continue
-        entry = {'type': kind, **media.model_dump(mode='json', exclude_none=True)}
+        entry = {'type': kind, **telegram_model_dump(media)}
         if kind == 'video_note':
             entry.update(width=media.length, height=media.length)
         if kind == 'document' and ((media.mime_type or '').startswith(('image/', 'video/')) or Path(media.file_name or '').suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.tiff', '.bmp', '.heic', '.avif', '.mov', '.mp4', '.webm', '.gif')):
@@ -178,10 +179,10 @@ async def analyze_messages(messages, bot, temp_dir):
         additional = []
         for field, value, field_entities in additional_text_fields(message):
             new_value, new_entities, field_changes = replace_custom_emoji(value, field_entities, stickers)
-            additional.append({'field': field, 'original_text': value, 'original_entities': [e.model_dump(mode='json', exclude_none=True) for e in field_entities], 'replaced_text': new_value, 'replaced_entities': [e.model_dump(mode='json', exclude_none=True) for e in new_entities], 'replacements': field_changes})
+            additional.append({'field': field, 'original_text': value, 'original_entities': [telegram_model_dump(e) for e in field_entities], 'replaced_text': new_value, 'replaced_entities': [telegram_model_dump(e) for e in new_entities], 'replacements': field_changes})
         if message.poll:
             warnings.append('Копия опроса создаётся как новый опрос; голоса исходного опроса не переносятся.')
-        items.append({'message_id': message.message_id, 'type': 'rich_message' if rich is not None else message.content_type, 'media_group_id': message.media_group_id, 'forward_origin': message.forward_origin.model_dump(mode='json', exclude_none=True) if message.forward_origin else None, 'media': media, 'original_text': text, 'original_entities': [e.model_dump(mode='json', exclude_none=True) for e in entities or []], 'replaced_text': replaced, 'replaced_entities': [e.model_dump(mode='json', exclude_none=True) for e in preserved], 'replacements': replacements, 'structure': grid_structure(text, entities), 'additional_text_fields': additional, 'raw_message': message.model_dump(mode='json', exclude_none=True)})
+        items.append({'message_id': message.message_id, 'type': 'rich_message' if rich is not None else message.content_type, 'media_group_id': message.media_group_id, 'forward_origin': telegram_model_dump(message.forward_origin) if message.forward_origin else None, 'media': media, 'original_text': text, 'original_entities': [telegram_model_dump(e) for e in entities or []], 'replaced_text': replaced, 'replaced_entities': [telegram_model_dump(e) for e in preserved], 'replacements': replacements, 'structure': grid_structure(text, entities), 'additional_text_fields': additional, 'raw_message': telegram_model_dump(message)})
         if rich is not None:
             items[-1].update(original_rich_message=rich, replaced_rich_message=replace_rich_emoji(rich, stickers), rich_structure=rich_structure(rich))
             grids = []

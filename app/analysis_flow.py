@@ -4,6 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.exceptions import TelegramAPIError
 from app.post_analysis import send_analysis
+from app.telegram_serialization import telegram_model_dump
 
 router = Router(name='post_analysis')
 settings = None
@@ -52,7 +53,7 @@ async def collect(message, state):
         return
     if any(item['message_id'] == message.message_id for item in messages):
         return
-    messages.append(message.model_dump(mode='json', exclude_none=True))
+    messages.append(telegram_model_dump(message))
     await state.update_data(analysis_messages=messages)
     # Avoid generating a reply for every item of an album.
     if not message.media_group_id or not any(item.get('media_group_id') == message.media_group_id for item in messages[:-1]):

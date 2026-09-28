@@ -8,6 +8,7 @@ from typing import ClassVar, Any
 
 from aiogram.methods.base import TelegramMethod
 from aiogram.types import Message, MessageEntity
+from app.telegram_serialization import telegram_model_dump
 
 
 class SendRichMessage(TelegramMethod[Message]):
@@ -23,7 +24,7 @@ MEDIA_TYPES = ('photo', 'video', 'animation', 'audio', 'document', 'voice_note')
 def rich_payload(message):
     value = getattr(message, 'rich_message', None)
     if hasattr(value, 'model_dump'):
-        value = value.model_dump(mode='json', exclude_none=True)
+        value = telegram_model_dump(value)
     return value if isinstance(value, dict) else None
 
 
